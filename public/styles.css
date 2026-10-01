@@ -272,3 +272,57 @@ tr.hist-stale { background: var(--warn-bg); }
 #evalContent code {
   background: #eef2f5; border-radius: 4px; padding: 0 6px; font-size: 12px;
 }
+
+/* ---------- 供应批号（原料输入行 + 追溯页） ---------- */
+.lot-badge {
+  display: inline-block; margin-left: 4px; padding: 0 7px; border-radius: 10px;
+  font-size: 11.5px; font-weight: 600; color: #2b5d7a; background: #e2eff7; border: 1px solid #bcd9e8;
+}
+.lot-badge.unknown { color: #8a6d1d; background: var(--warn-bg); border-color: #e8d29a; }
+.material-lot-grid { display: flex; flex-direction: column; gap: 8px; }
+.material-lot-card {
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #fbfcfd;
+}
+.material-lot-card.checked { border-color: #bcd9e8; background: #f4f9fc; }
+.ml-head { display: flex; align-items: center; gap: 8px; font-weight: normal; }
+.ml-head input { margin: 0; }
+.ml-lots { margin-top: 8px; padding-left: 26px; display: flex; flex-direction: column; gap: 6px; }
+.ml-lot-line { display: flex; align-items: center; gap: 8px; }
+.ml-lot {
+  flex: 1; max-width: 320px; padding: 5px 9px; border: 1px solid #cdd7e0;
+  border-radius: 6px; font-size: 13px;
+}
+.trace-form {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px;
+  border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: #fbfcfd;
+  margin-bottom: 14px;
+}
+.trace-form .modal-actions { grid-column: 1 / -1; }
+.trace-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+.trace-stats { display: flex; gap: 8px; flex-wrap: wrap; }
+.trace-stat { border-radius: 12px; padding: 3px 12px; font-size: 12.5px; font-weight: 600; }
+.trace-stat.confirm { background: #fdecea; color: var(--danger); border: 1px solid #e3b3ac; }
+.trace-stat.possible { background: var(--warn-bg); color: #8a6d1d; border: 1px solid #e8d29a; }
+.trace-stat.ship { background: #e2eff7; color: #2b5d7a; border: 1px solid #bcd9e8; }
+.trace-note { font-size: 12.5px; color: var(--muted); margin: 8px 0 12px; }
+.trace-sub.confirm { color: var(--danger); }
+.trace-sub.possible { color: #8a6d1d; }
+.trace-batch {
+  border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 10px; background: #fff;
+}
+.trace-batch.confirm { border-left-color: var(--danger); }
+.trace-batch.possible { border-left-color: #d9b44a; background: #fffdf6; }
+.trace-batch-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.trace-basis { margin: 8px 0; font-size: 13px; }
+.trace-basis ul { margin: 4px 0 0; padding-left: 20px; }
+.trace-paths { margin: 6px 0; padding-left: 18px; font-size: 12.5px; }
+.trace-path-confirm { color: #8f3329; }
+.trace-path-possible { color: #8a6d1d; }
+.trace-ship-mini { margin-top: 6px; font-size: 12.5px; color: #2b5d7a; }
+.trace-error {
+  border: 1px solid #e3b3ac; background: #fdecea; color: var(--danger);
+  border-radius: 8px; padding: 10px 14px; font-weight: 600;
+}
+.trace-error ul { margin: 6px 0 0; padding-left: 20px; font-weight: normal; }
+tr.trace-row-pending { background: var(--warn-bg); }

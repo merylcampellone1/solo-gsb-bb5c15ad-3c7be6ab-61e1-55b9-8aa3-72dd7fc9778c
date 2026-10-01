@@ -10,7 +10,8 @@
     "test:replan": "node scripts/test-replan.js",
     "test:labels": "node scripts/test-labels.js",
     "test:shipments": "node scripts/test-shipments.js",
-    "test:evaluations": "node scripts/test-evaluations.js"
+    "test:evaluations": "node scripts/test-evaluations.js",
+    "test:trace": "node scripts/test-trace.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",

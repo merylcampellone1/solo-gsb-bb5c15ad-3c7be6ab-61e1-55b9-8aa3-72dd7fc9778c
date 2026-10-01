@@ -332,11 +332,17 @@ function renderEvents() {
     if (ev.type === 'PROCESS') {
       const mats = ev.inputs.filter((i) => i.material_id);
       const refs = ev.inputs.filter((i) => i.ref_batch_id);
+      const matText = mats.length ? mats.map((m) => {
+        const lotTag = m.lot_known
+          ? `<span class="lot-badge">批号 ${esc(m.supplier_lot)}</span>`
+          : '<span class="lot-badge unknown">批号未知</span>';
+        return `${esc(m.material_name)}(${esc(m.material_code)})${lotTag}`;
+      }).join('、') : '—';
       body = `
         <div class="event-inputs"><b>产出：</b>${esc(ev.batch_code || '?')}
           ｜推导过敏原：<span class="tag-row" style="display:inline-flex">${allergenTags(ev.out_allergens)}</span>
         </div>
-        <div class="event-inputs"><b>原料：</b>${mats.length ? mats.map((m) => `${esc(m.material_name)}(${esc(m.material_code)})`).join('、') : '—'}
+        <div class="event-inputs"><b>原料：</b>${matText}
           ｜<b>引用批次：</b>${refs.length ? refs.map((r) => esc(r.ref_batch_code)).join('、') : '—'}</div>`;
     } else {
       body = `<div class="event-inputs"><b>已核实清洗：</b>清空设备残留${ev.note ? `｜${esc(ev.note)}` : ''}</div>`;
@@ -419,11 +425,90 @@ function fillEventModalOptions(ev) {
   $('#evEquipment').innerHTML = state.equipment
     .map((q) => `<option value="${q.id}" ${ev && ev.equipment_id === q.id ? 'selected' : ''}>${esc(q.name)}（${esc(q.code)}）</option>`)
     .join('');
-  $('#evMaterials').innerHTML = state.materials.map((m) => `
-    <label><input type="checkbox" name="material_ids" value="${m.id}"
-      ${ev && ev.inputs.some((i) => i.material_id === m.id) ? 'checked' : ''}>
-      ${esc(m.name)} <span class="batch-meta">[${esc(m.allergens.join('/') || '无过敏原')}]</span></label>`).join('');
+  renderMaterialLotInputs(ev);
   refreshRefBatchOptions(ev);
+}
+
+// 原料输入：每个原料一张卡；勾选后可逐行登记供应批号，同一原料可加多行（一次加工多个批号）。
+// ev.inputs: [{material_id, supplier_lot, lot_known, ...}]（编辑时按行回填；空批号 = 批号未知）。
+function renderMaterialLotInputs(ev) {
+  const box = $('#evMaterials');
+  // 编辑时该原料的各次投料批号（含未知行 null）；新增时全部为空（不勾选）。
+  const lotsByMaterial = new Map();
+  if (ev) {
+    for (const inp of ev.inputs.filter((i) => i.material_id)) {
+      if (!lotsByMaterial.has(inp.material_id)) lotsByMaterial.set(inp.material_id, []);
+      lotsByMaterial.get(inp.material_id).push(inp.supplier_lot || '');
+    }
+  }
+  box.innerHTML = state.materials.map((m) => {
+    const rows = lotsByMaterial.get(m.id);
+    const checked = ev ? rows !== undefined : false;
+    const initialLots = rows && rows.length ? rows : [''];
+    return `
+    <div class="material-lot-card ${checked ? 'checked' : ''}" data-material-id="${m.id}">
+      <label class="ml-head">
+        <input type="checkbox" class="ml-check" value="${m.id}" ${checked ? 'checked' : ''}>
+        <span>${esc(m.name)} <span class="batch-meta">[${esc(m.code)}｜${esc(m.allergens.join('/') || '无过敏原')}]</span></span>
+      </label>
+      <div class="ml-lots" ${checked ? '' : 'hidden'}>
+        ${initialLots.map((lot, i) => `
+          <div class="ml-lot-line">
+            <input type="text" class="ml-lot" data-lot-idx="${i}" value="${esc(lot)}"
+                   placeholder="供应批号（留空 = 批号未知）">
+            <button type="button" class="btn small ml-remove">删行</button>
+          </div>`).join('')}
+        <button type="button" class="btn small ml-add">＋ 另一批号</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  box.querySelectorAll('.material-lot-card').forEach((card) => {
+    const check = card.querySelector('.ml-check');
+    const lotBox = card.querySelector('.ml-lots');
+    check.addEventListener('change', () => {
+      card.classList.toggle('checked', check.checked);
+      lotBox.hidden = !check.checked;
+    });
+    card.querySelector('.ml-add').addEventListener('click', () => {
+      const idx = lotBox.querySelectorAll('.ml-lot').length;
+      const line = document.createElement('div');
+      line.className = 'ml-lot-line';
+      line.innerHTML = `
+        <input type="text" class="ml-lot" data-lot-idx="${idx}" placeholder="供应批号（留空 = 批号未知）">
+        <button type="button" class="btn small ml-remove">删行</button>`;
+      lotBox.insertBefore(line, card.querySelector('.ml-add'));
+      line.querySelector('.ml-remove').addEventListener('click', () => line.remove());
+      line.querySelector('.ml-lot').focus();
+    });
+    lotBox.querySelectorAll('.ml-remove').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const line = btn.closest('.ml-lot-line');
+        const lines = lotBox.querySelectorAll('.ml-lot-line');
+        // 至少保留一行，避免该原料勾选后无输入行（留空行即“批号未知”的一次投料）。
+        if (lines.length > 1) line.remove();
+        else line.querySelector('.ml-lot').value = '';
+      });
+    });
+  });
+}
+
+// 从弹窗收集原料输入：[{material_id, supplier_lot: string|null}]，同料同批号去重。
+function collectMaterialInputs() {
+  const out = [];
+  const seen = new Set();
+  $('#evMaterials').querySelectorAll('.material-lot-card').forEach((card) => {
+    if (!card.querySelector('.ml-check').checked) return;
+    const material_id = parseInt(card.dataset.materialId, 10);
+    card.querySelectorAll('.ml-lot').forEach((inp) => {
+      const lot = inp.value.trim();
+      const key = `${material_id}|${lot}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ material_id, supplier_lot: lot || null });
+    });
+  });
+  return out;
 }
 
 function refreshRefBatchOptions(ev) {
@@ -474,7 +559,7 @@ $('#eventForm').onsubmit = async (e) => {
     equipment_id: parseInt(f.equipment_id.value, 10),
     note: f.note.value,
     batch_code: f.batch_code.value,
-    material_ids: $$('#evMaterials input:checked').map((x) => parseInt(x.value, 10)),
+    material_inputs: collectMaterialInputs(),
     ref_batch_ids: $$('#evBatches input:checked').map((x) => parseInt(x.value, 10))
   };
   try {
@@ -984,5 +1069,136 @@ $('#evaluationModal').addEventListener('submit', async (e) => {
   }
 });
 
+// ================= 供应批号追溯 =================
+function renderTraceMaterialOptions() {
+  const sel = $('#traceMaterial');
+  const current = sel.value;
+  sel.innerHTML = state.materials
+    .map((m) => `<option value="${esc(m.code)}">${esc(m.name)}（${esc(m.code)}）</option>`)
+    .join('');
+  if (current) sel.value = current;
+  loadTraceLotList();
+}
+$('#traceMaterial')?.addEventListener('change', loadTraceLotList);
+
+async function loadTraceLotList() {
+  const code = $('#traceMaterial').value;
+  const list = $('#traceLotList');
+  if (!code || !list) return;
+  try {
+    const r = await api(`/api/materials/${encodeURIComponent(code)}/supplier-lots`);
+    list.innerHTML = r.lots.map((l) => `<option value="${esc(l.supplier_lot)}">`).join('');
+  } catch (_) { list.innerHTML = ''; }
+}
+
+$('#traceForm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const params = new URLSearchParams({
+    material_code: f.material_code.value,
+    supplier_lot: f.supplier_lot.value.trim(),
+    max_paths: f.max_paths.value || '20'
+  });
+  try {
+    const r = await api(`/api/trace?${params}`);
+    renderTraceResult(r);
+  } catch (err) {
+    $('#traceResult').innerHTML =
+      `<div class="trace-error">⛔ ${esc(err.error || '追溯失败')}` +
+      (err.details && err.details.length
+        ? `<ul>${err.details.map((d) => typeof d === 'string' ? `<li>${esc(d)}</li>`
+            : `<li>批号登记在：${esc(d.material_name)}(${esc(d.material_code)})</li>`).join('')}</ul>` : '') +
+      `</div>`;
+  }
+});
+
+function renderTraceResult(r) {
+  const q = r.query;
+  const head = `
+    <div class="trace-head">
+      <div>追溯对象：<b>${esc(q.material_name)}（${esc(q.material_code)}）</b> ·
+        供应批号 <b class="lot-badge">${esc(q.supplier_lot)}</b></div>
+      <div class="trace-stats">
+        <span class="trace-stat confirm">确定命中 ${r.summary.confirmed_batch_count} 批</span>
+        <span class="trace-stat possible">无法排除（批号未知）${r.summary.possible_batch_count} 批</span>
+        <span class="trace-stat ship">关联出货单 ${r.summary.affected_shipment_count} 张</span>
+      </div>
+    </div>
+    <div class="trace-note">${esc(r.note)}</div>`;
+
+  const groups = [
+    { key: 'confirmed', title: '确定命中（该批号经直接投料/前序引用/未清洗残留确定流入）', cls: 'confirm', list: r.confirmed_batches },
+    { key: 'possible', title: '无法排除（该原料批号未知，或上游仅能“无法排除”；不得列为安全）', cls: 'possible', list: r.possible_batches }
+  ];
+  const body = groups.map((g) => `
+    <h3 class="sub-head trace-sub ${g.cls}">${esc(g.title)}（${g.list.length}）</h3>
+    ${g.list.length ? g.list.map((b) => renderTraceBatch(b, g.cls)).join('')
+      : '<div class="batch-meta">无。</div>'}`).join('');
+
+  const ships = r.affected_shipments.length ? `
+    <h3 class="sub-head">关联出货单（${r.affected_shipments.length}）</h3>
+    <table class="grid item-table">
+      <thead><tr><th>出货单号</th><th>状态</th><th>关联批次</th><th>出货量</th><th>出货时间</th><th>操作人</th><th>当前处置结论</th></tr></thead>
+      <tbody>${r.affected_shipments.map((s) => `
+        <tr class="${s.pending_review ? 'trace-row-pending' : ''}">
+          <td>${esc(s.shipment_code)}</td>
+          <td>${s.pending_review ? '<span class="tag danger">待评估</span>' : '<span class="tag ok">已出货</span>'}</td>
+          <td>${esc(s.matched_via.join('、'))}</td>
+          <td>${s.ship_qty}</td>
+          <td>${esc(fmtTime(s.shipped_at))}</td>
+          <td>${esc(s.shipped_by)}</td>
+          <td>${s.current_decision_text
+            ? `${esc(s.current_decision_text)}${s.current_disposition_life_status === 'STALE' ? '（需重新评估）' : ''}`
+            : '—'}</td>
+        </tr>`).join('')}</tbody>
+    </table>` : '';
+
+  $('#traceResult').innerHTML = head + body + ships;
+}
+
+function renderTraceBatch(b, cls) {
+  const basisLines = [];
+  const d = b.basis.direct_inputs;
+  if (d.target_lot_input_count > 0) {
+    basisLines.push(`直接投料该批号 ×${d.target_lot_input_count}`);
+  }
+  if (d.other_known_lots.length) {
+    basisLines.push(`同次还投入该原料其它批号：${d.other_known_lots.map((x) => `批号 ${esc(x)}`).join('、')}`);
+  }
+  if (d.unknown_lot_input_count > 0) {
+    basisLines.push(`直接投入该原料但<b>批号未知 ×${d.unknown_lot_input_count}</b>（无法排除）`);
+  }
+  for (const x of b.basis.via_refs) {
+    basisLines.push(`前序批次引用：${esc(x.batch_code)}（${x.status === 'CONFIRMED' ? '确定命中' : '无法排除'}）`);
+  }
+  for (const x of b.basis.via_residue) {
+    basisLines.push(`同设备 <b>${esc(x.equipment_code || '')}</b> 未清洗残留，源自 ${esc(x.batch_code)}（${x.status === 'CONFIRMED' ? '确定命中' : '无法排除'}）`);
+  }
+  return `
+  <div class="trace-batch ${cls}">
+    <div class="trace-batch-head">
+      <span class="batch-code">${esc(b.batch_code)}</span>
+      <span class="badge ${cls === 'confirm' ? 'disp-continue' : 'disp-stale'}">${cls === 'confirm' ? '确定命中' : '无法排除'}</span>
+      <span class="batch-meta">产出 ${esc(fmtTime(b.produced_at))} · 设备 ${esc(b.equipment_code || '—')}</span>
+      <span class="spacer"></span>
+      <span class="batch-meta">关联出货单 ${b.shipments.length} 张</span>
+    </div>
+    <div class="trace-basis"><b>传播依据：</b>
+      <ul>${basisLines.map((x) => `<li>${x}</li>`).join('')}</ul>
+    </div>
+    <details ${b.paths_truncated ? 'open' : ''}>
+      <summary>传播路径（展示 ${b.paths_shown}/${b.path_count_total} 条${b.paths_truncated ? '，已限量截断' : ''}）</summary>
+      <ul class="trace-paths">
+        ${b.paths.map((p) => `<li class="trace-path-${p.root_status === 'CONFIRMED' ? 'confirm' : 'possible'}">${esc(p.path)}</li>`).join('')}
+        ${b.paths_truncated ? '<li class="batch-meta">…路径过多，已按上限截断（受影响批次/出货单不受影响，仍全部列出）</li>' : ''}
+      </ul>
+    </details>
+    ${b.shipments.length ? `
+      <div class="trace-ship-mini"><b>关联出货单：</b>${b.shipments.map((s) =>
+        `${esc(s.shipment_code)}（${s.pending_review ? '待评估' : '已出货'}${s.ship_qty ? '，' + s.ship_qty + ' 张' : ''}）`).join('、')}</div>` : ''}
+  </div>`;
+}
+
 // ================= 启动 =================
-refresh().catch((err) => notice('error', '加载状态失败', err.message || String(err)));
+refresh().then(renderTraceMaterialOptions)
+  .catch((err) => notice('error', '加载状态失败', err.message || String(err)));

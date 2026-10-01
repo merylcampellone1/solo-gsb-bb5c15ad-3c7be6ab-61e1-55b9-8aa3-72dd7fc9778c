@@ -59,6 +59,9 @@ function initSchema(d) {
     event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
     material_id INTEGER REFERENCES materials(id),
     batch_id INTEGER REFERENCES batches(id),
+    -- 该次投入的“原料所属供应批号”（供应商通报的批号，可空）。
+    -- NULL/缺省表示批号未知：仅可能来自 material_ids 等旧写入或未登记批号的录入。
+    supplier_lot TEXT,
     CHECK ((material_id IS NOT NULL AND batch_id IS NULL)
         OR (material_id IS NULL AND batch_id IS NOT NULL))
   );
@@ -186,6 +189,8 @@ function initSchema(d) {
 
   CREATE INDEX IF NOT EXISTS idx_events_time ON events(event_time, id);
   CREATE INDEX IF NOT EXISTS idx_process_inputs_event ON process_inputs(event_id);
+  CREATE INDEX IF NOT EXISTS idx_process_inputs_material_lot
+    ON process_inputs(material_id, supplier_lot);
   CREATE INDEX IF NOT EXISTS idx_releases_batch ON releases(batch_id);
   CREATE INDEX IF NOT EXISTS idx_label_rolls_batch ON label_rolls(batch_id);
   CREATE INDEX IF NOT EXISTS idx_label_usages_roll ON label_roll_usages(roll_id);
@@ -195,6 +200,14 @@ function initSchema(d) {
   CREATE INDEX IF NOT EXISTS idx_shipment_items_roll ON shipment_items(roll_id);
   CREATE INDEX IF NOT EXISTS idx_ship_disp_shipment ON shipment_dispositions(shipment_id);
   `);
+
+  // 旧库迁移：既有 process_inputs 表没有 supplier_lot 列（供应批号追溯本轮新增）。
+  // 旧记录 supplier_lot 保持 NULL = 批号未知，旧数据不丢失、旧写入语义不变。
+  const cols = d.prepare('PRAGMA table_info(process_inputs)').all().map((c) => c.name);
+  if (!cols.includes('supplier_lot')) {
+    d.exec('ALTER TABLE process_inputs ADD COLUMN supplier_lot TEXT');
+    d.exec('CREATE INDEX IF NOT EXISTS idx_process_inputs_material_lot ON process_inputs(material_id, supplier_lot)');
+  }
 }
 
 module.exports = { getDb, initDbFile, initSchema, DB_PATH };

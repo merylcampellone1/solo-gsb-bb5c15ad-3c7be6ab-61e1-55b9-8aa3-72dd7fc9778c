@@ -17,6 +17,7 @@
   <button class="tab" data-tab="labels">过敏原标签卷</button>
   <button class="tab" data-tab="shipments">包装出货</button>
   <button class="tab" data-tab="events">事件时间线（加工 / 清洗）</button>
+  <button class="tab" data-tab="trace">供应批号追溯</button>
   <button class="tab" data-tab="base">原料与设备</button>
 </nav>
 
@@ -87,6 +88,39 @@
     <div id="eventList" class="event-list"></div>
   </section>
 
+  <!-- ============ 供应批号追溯 ============ -->
+  <section id="tab-trace" class="tab-panel">
+    <div class="panel-head">
+      <h2>供应商通报批号异常 · 可能流向追溯</h2>
+    </div>
+    <p class="section-hint">
+      指定<b>原料</b>与<b>供应批号</b>查询：系统按<b>最新合法时间线</b>沿
+      <b>直接投料、前序批次引用、同设备未清洗残留（逐时传播，已核实清洗截断）</b>推导，
+      返回<b>确定命中</b>批次与<b>因该原料批号未知而无法排除</b>的批次、各自传播依据、路径链及关联出货单。
+      追溯<b>仅供查询</b>，不自动改变放行、标签卷、出货与质量处置结论；批号未知的批次不得据此列为安全。
+    </p>
+    <form id="traceForm" class="trace-form">
+      <div class="form-row">
+        <label>原料 <span class="req">*</span></label>
+        <select name="material_code" id="traceMaterial" required></select>
+      </div>
+      <div class="form-row">
+        <label>供应批号 <span class="req">*</span></label>
+        <input type="text" name="supplier_lot" id="traceLot" list="traceLotList" placeholder="如 MLK-20260928-A（可从该原料已登记批号中选择）" required>
+        <datalist id="traceLotList"></datalist>
+      </div>
+      <div class="form-row">
+        <label>每批路径展示上限</label>
+        <input type="number" name="max_paths" min="1" max="500" step="1" value="20" style="width:110px">
+        <small class="hint">仅限制路径条数，受影响批次/出货单不会漏报。</small>
+      </div>
+      <div class="modal-actions">
+        <button type="submit" class="btn primary">追溯可能流向</button>
+      </div>
+    </form>
+    <div id="traceResult"></div>
+  </section>
+
   <!-- ============ 基础数据 ============ -->
   <section id="tab-base" class="tab-panel">
     <div class="base-grid">
@@ -140,8 +174,10 @@
           <input type="text" name="batch_code" placeholder="如 BATCH-006">
         </div>
         <div class="form-row align-top">
-          <label>原料输入</label>
-          <div id="evMaterials" class="check-grid"></div>
+          <label>原料输入与供应批号</label>
+          <div id="evMaterials" class="material-lot-grid"></div>
+          <small class="hint">勾选原料并逐行登记<b>供应批号</b>；同一种原料在本次加工中可点“＋另一批号”使用多个批号。
+            批号留空 = 批号未知（与仅传 material_ids 的旧写入一致），追溯时该批会列为“无法排除”。</small>
         </div>
         <div class="form-row align-top">
           <label>引用此前批次</label>

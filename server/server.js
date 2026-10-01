@@ -9,6 +9,7 @@ const replan = require('./replan');
 const labels = require('./labels');
 const shipments = require('./shipments');
 const evaluation = require('./evaluation');
+const trace = require('./trace');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -67,7 +68,7 @@ app.get('/api/state', (req, res) => {
     out_allergens: ev.out_allergens ? JSON.parse(ev.out_allergens) : [],
     out_paths: ev.out_paths ? JSON.parse(ev.out_paths) : {},
     inputs: db.prepare(
-      `SELECT pi.material_id, pi.batch_id AS ref_batch_id,
+      `SELECT pi.material_id, pi.batch_id AS ref_batch_id, pi.supplier_lot,
               m.name AS material_name, m.code AS material_code,
               m.allergens AS material_allergens,
               rb.code AS ref_batch_code
@@ -78,6 +79,8 @@ app.get('/api/state', (req, res) => {
     ).all(ev.id).map((r) => ({
       material_id: r.material_id,
       ref_batch_id: r.ref_batch_id,
+      supplier_lot: r.supplier_lot,
+      lot_known: r.material_id != null && r.supplier_lot != null,
       material_code: r.material_code,
       material_name: r.material_name,
       material_allergens: r.material_allergens ? JSON.parse(r.material_allergens) : null,
@@ -272,9 +275,11 @@ app.post('/api/events', (req, res) => {
         'INSERT INTO events (event_time, type, equipment_id, batch_id, note) VALUES (?,?,?,?,?)'
       ).run(body.event_time, body.type, body.equipment_id, batchId, body.note).lastInsertRowid;
       if (body.type === 'PROCESS') {
-        for (const mid of body.material_ids) {
-          d.prepare('INSERT INTO process_inputs (event_id, material_id) VALUES (?,?)')
-            .run(eid, mid);
+        const knownMat = new Set(d.prepare('SELECT id FROM materials').all().map((m) => m.id));
+        for (const inp of body.material_inputs) {
+          if (!knownMat.has(inp.material_id)) throw new Error(`原料 #${inp.material_id} 不存在`);
+          d.prepare('INSERT INTO process_inputs (event_id, material_id, supplier_lot) VALUES (?,?,?)')
+            .run(eid, inp.material_id, inp.supplier_lot);
         }
         for (const bid of body.ref_batch_ids) {
           d.prepare('INSERT INTO process_inputs (event_id, batch_id) VALUES (?,?)')
@@ -301,9 +306,11 @@ app.put('/api/events/:id', (req, res) => {
         d.prepare('UPDATE batches SET code=? WHERE id=?')
           .run(body.batch_code, existing.batch_id);
         d.prepare('DELETE FROM process_inputs WHERE event_id=?').run(existing.id);
-        for (const mid of body.material_ids) {
-          d.prepare('INSERT INTO process_inputs (event_id, material_id) VALUES (?,?)')
-            .run(existing.id, mid);
+        const knownMat = new Set(d.prepare('SELECT id FROM materials').all().map((m) => m.id));
+        for (const inp of body.material_inputs) {
+          if (!knownMat.has(inp.material_id)) throw new Error(`原料 #${inp.material_id} 不存在`);
+          d.prepare('INSERT INTO process_inputs (event_id, material_id, supplier_lot) VALUES (?,?,?)')
+            .run(existing.id, inp.material_id, inp.supplier_lot);
         }
         for (const bid of body.ref_batch_ids) {
           d.prepare('INSERT INTO process_inputs (event_id, batch_id) VALUES (?,?)')
@@ -382,14 +389,57 @@ function normalizeEventBody(body, isUpdate = false) {
   if (!Number.isInteger(equipment_id)) throw new Error('请选择设备');
   const note = String(body.note || '').trim();
 
-  const out = { type, event_time, equipment_id, note, material_ids: [], ref_batch_ids: [] };
+  const out = { type, event_time, equipment_id, note, material_ids: [], ref_batch_ids: [], material_inputs: [] };
   if (type === 'PROCESS') {
     const batch_code = String(body.batch_code || '').trim();
     if (!batch_code) throw new Error('产出批次编码不能为空');
     out.batch_code = batch_code;
-    out.material_ids = idList(body.material_ids);
     out.ref_batch_ids = idList(body.ref_batch_ids);
+
+    // 原料输入两种写法（不可混用）：
+    //   1) material_inputs: [{material_id, supplier_lot?}, ...]  新写法，可逐次投料登记供应批号，
+    //      同一原料可出现多次（一次加工使用多个批号，含批号未知：supplier_lot 省略/空串）。
+    //   2) material_ids: [id, ...]                               旧写法，输入一律记为批号未知。
+    const hasNew = body.material_inputs !== undefined;
+    const hasLegacy = body.material_ids !== undefined;
+    if (hasNew && hasLegacy) {
+      throw new Error('material_inputs（按批号登记原料输入）与 material_ids（旧写法）不能同时提交，请二选一');
+    }
+    if (hasNew) out.material_inputs = normalizeMaterialInputs(body.material_inputs);
+    else {
+      out.material_ids = idList(body.material_ids);
+      out.material_inputs = out.material_ids.map((material_id) => ({ material_id, supplier_lot: null }));
+    }
   }
+  return out;
+}
+
+// 规范化原料输入（含供应批号）：去重保持顺序；批号 trim 后空串/缺失记为未知（NULL）。
+function normalizeMaterialInputs(raw) {
+  if (!Array.isArray(raw)) throw new Error('material_inputs 必须是数组，元素为 {material_id, supplier_lot?}');
+  const out = [];
+  const seen = new Set();
+  raw.forEach((item, idx) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error(`material_inputs[${idx}] 必须是 {material_id, supplier_lot?} 对象`);
+    }
+    const material_id = parseInt(item.material_id, 10);
+    if (!Number.isInteger(material_id)) {
+      throw new Error(`material_inputs[${idx}] 缺少合法的 material_id`);
+    }
+    let lot = null;
+    if (item.supplier_lot !== undefined && item.supplier_lot !== null) {
+      lot = String(item.supplier_lot).trim();
+      if (!lot) lot = null;
+    }
+    const key = `${material_id}|${lot === null ? '' : lot}`;
+    if (seen.has(key)) {
+      // 同一原料同一批号重复登记无意义（未知也只保留一条）。
+      return;
+    }
+    seen.add(key);
+    out.push({ material_id, supplier_lot: lot });
+  });
   return out;
 }
 
@@ -589,6 +639,39 @@ function sendShipmentError(res, err) {
     const status = (err.code === 'ROLL_RETIRED' || err.code === 'RELEASE_INACTIVE' ||
       err.code === 'OVER_APPLIED') ? 409 : 400;
     return res.status(status).json({
+      error: err.message,
+      code: err.code,
+      details: err.details
+    });
+  }
+  console.error(err);
+  return res.status(500).json({ error: err && err.message ? err.message : '服务器内部错误' });
+}
+
+// ---------- 供应批号追溯（只读；不改变放行/卷/出货/处置） ----------
+// 查询指定原料 + 供应批号的可能流向：
+//   GET /api/trace?material_id=3&supplier_lot=MLK-20260920-A
+//   GET /api/trace?material_code=MILK-01&supplier_lot=...&max_paths=20
+// 返回确定命中批次（confirmed_batches）与因批号未知而无法排除的批次（possible_batches），
+// 各自传播依据（直接投料/前序引用/同设备未清洗残留）、路径链与关联出货单。
+// 批号不存在 → 404 SUPPLIER_LOT_NOT_FOUND；批号与原料不匹配 → 400 SUPPLIER_LOT_MISMATCH。
+app.get('/api/trace', (req, res) => {
+  try {
+    res.json(trace.trace(db, req.query));
+  } catch (err) { sendTraceError(res, err); }
+});
+
+// 原料名下已登记供应批号清单（供前端下拉/调用方探查）：
+//   GET /api/materials/:idOrCode/supplier-lots
+app.get('/api/materials/:idOrCode/supplier-lots', (req, res) => {
+  try {
+    res.json(trace.listLots(db, req.params.idOrCode));
+  } catch (err) { sendTraceError(res, err); }
+});
+
+function sendTraceError(res, err) {
+  if (err && err.name === 'TraceError') {
+    return res.status(err.status || 400).json({
       error: err.message,
       code: err.code,
       details: err.details

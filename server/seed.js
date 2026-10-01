@@ -40,7 +40,7 @@ function seedIfEmpty() {
     const lineA = insEquip.run('LINE-A', '烘焙A线').lastInsertRowid;
     const fryerB = insEquip.run('FRYER-B', '油炸B线').lastInsertRowid;
 
-    ['BATCH-001', 'BATCH-002', 'BATCH-003', 'BATCH-004', 'BATCH-005']
+    ['BATCH-001', 'BATCH-002', 'BATCH-003', 'BATCH-004', 'BATCH-005', 'BATCH-DEMO-U1', 'BATCH-DEMO-U2']
       .forEach((code) => { batchIds[code] = insBatch.run(code).lastInsertRowid; });
 
     const D = '2026-09-30T';
@@ -48,26 +48,33 @@ function seedIfEmpty() {
       insEvent.run(D + time, 'PROCESS', equip, bid, note).lastInsertRowid;
     const clean = (time, equip, note) =>
       insEvent.run(D + time, 'CLEAN', equip, null, note).lastInsertRowid;
-    const matInput = (eid, code) => insInput.run(eid, mats[code], null);
+    // 原料投料可登记供应批号（lot 省略即批号未知）；同一原料在一次加工中可投多个批号。
+    const insMatLot = db.prepare(
+      'INSERT INTO process_inputs (event_id, material_id, batch_id, supplier_lot) VALUES (?,?,?,?)'
+    );
+    const matInput = (eid, code, lot) =>
+      insMatLot.run(eid, mats[code], null, lot === undefined ? null : lot).lastInsertRowid;
     const batchInput = (eid, code) => insInput.run(eid, null, batchIds[code]);
 
     const e1 = process('08:00', lineA, batchIds['BATCH-001'], '早班面团');
-    matInput(e1, 'WHEAT-01');
-    matInput(e1, 'SALT-01');
+    matInput(e1, 'WHEAT-01', 'WHT-20260920-A');
+    // 同一原料一次加工使用多个供应批号（新旧两批小麦粉）：
+    matInput(e1, 'WHEAT-01', 'WHT-20260925-A');
+    matInput(e1, 'SALT-01'); // 旧方式未登记批号 → 批号未知
 
     clean('09:00', lineA, '换线前已核实清洗');
 
     const e3 = process('10:00', lineA, batchIds['BATCH-002'], '蛋糕糊');
-    matInput(e3, 'MILK-01');
-    matInput(e3, 'EGG-01');
+    matInput(e3, 'MILK-01', 'MLK-20260928-A');
+    matInput(e3, 'EGG-01', 'EGG-20260928-B');
 
     const e4 = process('11:00', lineA, batchIds['BATCH-003'], '芝麻风味蛋糕糊（引用上一批）');
-    matInput(e4, 'SESAME-01');
+    matInput(e4, 'SESAME-01', 'SES-20260920-A');
     batchInput(e4, 'BATCH-002');
 
     const e5 = process('12:00', fryerB, batchIds['BATCH-004'], '裹粉花生');
-    matInput(e5, 'PEANUT-01');
-    matInput(e5, 'SOY-01');
+    matInput(e5, 'PEANUT-01', 'PNT-20260925-X');
+    matInput(e5, 'SOY-01', 'SOY-20260920-A');
 
     clean('13:00', fryerB, '已核实清洗（CIP + 目视复核）');
 
@@ -75,6 +82,16 @@ function seedIfEmpty() {
     matInput(e7, 'SALT-01');
 
     clean('15:00', lineA, '班后已核实清洗');
+
+    // 批号未知演示：16:00 LINE-A 投批号未知的全脂奶粉（旧写法/未登记批号），
+    // 17:00 同设备未清洗再加工（仅引用），用于展示“因批号未知无法排除”的 POSSIBLE 传播。
+    const e8 = process('16:00', lineA, batchIds['BATCH-DEMO-U1'], '夜班奶糊（奶粉批号未登记）');
+    matInput(e8, 'MILK-01'); // 批号未知
+    const e9 = process('17:00', lineA, batchIds['BATCH-DEMO-U2'], '夜班二套（引用上一批，同设备未清洗）');
+    matInput(e9, 'SALT-01');
+    batchInput(e9, 'BATCH-DEMO-U1');
+
+    clean('17:30', lineA, '夜班批号未知演示后已核实清洗');
   });
   insertBase();
 
