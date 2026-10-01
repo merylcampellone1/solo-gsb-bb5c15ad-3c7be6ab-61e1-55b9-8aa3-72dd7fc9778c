@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>食品加工换线 · 过敏原追踪与放行</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>食品加工换线 · 过敏原追踪系统</h1>
+  <div class="subtitle">Node.js + SQLite · 本地保存 · 产出过敏原 = 原料 ∪ 引用批次 ∪ 设备残留</div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="batches">批次与放行</button>
+  <button class="tab" data-tab="labels">过敏原标签卷</button>
+  <button class="tab" data-tab="shipments">包装出货</button>
+  <button class="tab" data-tab="events">事件时间线（加工 / 清洗）</button>
+  <button class="tab" data-tab="base">原料与设备</button>
+</nav>
+
+<div id="notice" class="notice hidden"></div>
+
+<main>
+  <!-- ============ 批次视图 ============ -->
+  <section id="tab-batches" class="tab-panel active">
+    <div class="panel-head">
+      <h2>设备当前残留</h2>
+    </div>
+    <div id="residueCards" class="residue-grid"></div>
+
+    <div class="panel-head">
+      <h2>批次推导结果与放行</h2>
+      <button class="btn primary" id="btnNewEventTop">＋ 录入事件</button>
+    </div>
+    <div id="batchList" class="batch-list"></div>
+  </section>
+
+  <!-- ============ 标签卷视图 ============ -->
+  <section id="tab-labels" class="tab-panel">
+    <div class="panel-head">
+      <h2>过敏原标签卷（按批次）</h2>
+      <button class="btn primary" id="btnNewRoll">＋ 包装前登记标签卷</button>
+    </div>
+    <p class="section-hint">
+      登记时拟印过敏原集合必须与<b>当前批次推导结果</b>及<b>所选有效放行快照</b>完全一致。
+      核销按“预期修订号”整次提交，旧修订号 / 负数 / 累计超印量均整次拒绝。
+      集合改变或绑定放行失效、删除后该卷<b>永久停用</b>：余量冻结、已贴数量待复核，集合恢复也不自动解冻。
+    </p>
+    <div id="rollList" class="roll-list"></div>
+  </section>
+
+  <!-- ============ 包装出货视图 ============ -->
+  <section id="tab-shipments" class="tab-panel">
+    <div class="panel-head">
+      <h2>包装出货（按批次分配已贴用标签）</h2>
+      <button class="btn primary" id="btnNewShipment">＋ 包装出货确认</button>
+    </div>
+    <p class="section-hint">
+      出货按整单提交：各卷必须<b>属于该批次、未停用且绑定有效放行</b>，
+      各卷分配张数之和<b>恰好等于出货量</b>，每卷累计已分配不得超过<b>已贴用数</b>；
+      任一条件不满足则整单拒绝、不占用数量。出货时保存放行标识、过敏原集合、卷号与修订号快照。
+      原料/事件变更或放行删除导致卷停用时，相关已出货单转为<b>待评估</b>（不自动恢复），
+      该卷尚未分配的已贴张数也不得再出货。
+    </p>
+    <p class="section-hint">
+      <b>待评估出货单的质量处置（整单）</b>：质检人员按整单登记
+      <b>准予继续流转（CONTINUE）</b>或<b>召回（RECALL）</b>，须提交操作人、依据与查询时取得的状态版本。
+      准予继续流转仅在<b>批次仍存在、当前有有效放行且出货快照覆盖当前过敏原</b>时允许，否则只能召回；
+      提交在事务内核对最新版本，过期拒绝且不产生记录。处置记录<b>只增不改</b>：
+      此后批次过敏原、有效放行或所用卷停用信息变化时，旧结论保留并标为<b>需重新评估</b>（不自动生效），
+      出货单原状态与数量占用始终不变。
+    </p>
+    <h3 class="sub-head">批次可出货余额（未停用卷的「已贴用 − 累计已分配」）</h3>
+    <div id="balanceList" class="balance-grid"></div>
+    <h3 class="sub-head">出货单</h3>
+    <div id="shipmentList" class="shipment-list"></div>
+  </section>
+
+  <!-- ============ 事件视图 ============ -->
+  <section id="tab-events" class="tab-panel">
+    <div class="panel-head">
+      <h2>按时间排序的加工与已核实清洗事件</h2>
+      <button class="btn primary" id="btnNewEvent">＋ 录入事件</button>
+    </div>
+    <div id="eventList" class="event-list"></div>
+  </section>
+
+  <!-- ============ 基础数据 ============ -->
+  <section id="tab-base" class="tab-panel">
+    <div class="base-grid">
+      <div>
+        <div class="panel-head">
+          <h2>原料及其过敏原</h2>
+          <button class="btn primary" id="btnNewMaterial">＋ 新增原料</button>
+        </div>
+        <table class="grid">
+          <thead><tr><th>编码</th><th>名称</th><th>过敏原</th><th></th></tr></thead>
+          <tbody id="materialRows"></tbody>
+        </table>
+      </div>
+      <div>
+        <div class="panel-head">
+          <h2>设备</h2>
+          <button class="btn primary" id="btnNewEquipment">＋ 新增设备</button>
+        </div>
+        <table class="grid">
+          <thead><tr><th>编码</th><th>名称</th><th></th></tr></thead>
+          <tbody id="equipmentRows"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ============ 事件弹窗 ============ -->
+<div id="eventModal" class="modal hidden">
+  <div class="modal-box wide">
+    <h3 id="eventModalTitle">录入事件</h3>
+    <form id="eventForm">
+      <div class="form-row">
+        <label>事件类型</label>
+        <select name="type" id="evType">
+          <option value="PROCESS">加工</option>
+          <option value="CLEAN">已核实清洗</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>时间 <span class="req">*</span></label>
+        <input type="datetime-local" name="event_time" required>
+      </div>
+      <div class="form-row">
+        <label>设备 <span class="req">*</span></label>
+        <select name="equipment_id" id="evEquipment" required></select>
+      </div>
+      <div id="processFields">
+        <div class="form-row">
+          <label>产出批次编码 <span class="req">*</span></label>
+          <input type="text" name="batch_code" placeholder="如 BATCH-006">
+        </div>
+        <div class="form-row align-top">
+          <label>原料输入</label>
+          <div id="evMaterials" class="check-grid"></div>
+        </div>
+        <div class="form-row align-top">
+          <label>引用此前批次</label>
+          <div id="evBatches" class="check-grid"></div>
+          <small class="hint">只能引用产出时间早于本事件时间的批次；引用未来批次或形成循环会被拒绝。</small>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>备注 / 核实说明</label>
+        <input type="text" name="note" placeholder="如：CIP + 目视复核">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="eventCancel">取消</button>
+        <button type="submit" class="btn primary">提交（整单校验）</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ 原料弹窗 ============ -->
+<div id="materialModal" class="modal hidden">
+  <div class="modal-box">
+    <h3 id="materialModalTitle">新增原料</h3>
+    <form id="materialForm">
+      <input type="hidden" name="id">
+      <div class="form-row"><label>编码 *</label><input type="text" name="code" required></div>
+      <div class="form-row"><label>名称 *</label><input type="text" name="name" required></div>
+      <div class="form-row align-top">
+        <label>过敏原（逗号分隔）</label>
+        <input type="text" name="allergens" placeholder="如：乳,蛋">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ 设备弹窗 ============ -->
+<div id="equipmentModal" class="modal hidden">
+  <div class="modal-box">
+    <h3 id="equipmentModalTitle">新增设备</h3>
+    <form id="equipmentForm">
+      <input type="hidden" name="id">
+      <div class="form-row"><label>编码 *</label><input type="text" name="code" required></div>
+      <div class="form-row"><label>名称 *</label><input type="text" name="name" required></div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ 放行弹窗 ============ -->
+<div id="releaseModal" class="modal hidden">
+  <div class="modal-box">
+    <h3>登记批次放行</h3>
+    <form id="releaseForm">
+      <input type="hidden" name="batch_id">
+      <div class="form-row"><label>批次</label><input type="text" name="batch_code" readonly></div>
+      <div class="form-row align-top">
+        <label>当时推导过敏原</label>
+        <div id="releaseAllergens" class="tag-row"></div>
+      </div>
+      <div class="form-row"><label>放行时间 *</label><input type="datetime-local" name="released_at" required></div>
+      <div class="form-row"><label>放行人</label><input type="text" name="released_by" placeholder="姓名/工号"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">以当时结果登记放行</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ 标签卷登记弹窗 ============ -->
+<div id="rollModal" class="modal hidden">
+  <div class="modal-box wide">
+    <h3>包装前登记过敏原标签卷</h3>
+    <form id="rollForm">
+      <div class="form-row">
+        <label>选择批次 <span class="req">*</span></label>
+        <select name="batch_id" id="rollBatch" required></select>
+      </div>
+      <div class="form-row">
+        <label>有效放行快照 <span class="req">*</span></label>
+        <select name="release_id" id="rollRelease" required></select>
+      </div>
+      <div class="form-row align-top">
+        <label>当前推导集合</label>
+        <div id="rollCurrent" class="tag-row"></div>
+      </div>
+      <div class="form-row align-top">
+        <label>拟印过敏原集合 <span class="req">*</span></label>
+        <input type="text" name="allergens_text" id="rollAllergens" placeholder="必须与当前推导、放行快照完全一致（逗号分隔，如：乳,蛋）">
+      </div>
+      <div class="form-row">
+        <label>印量（张，正整数）<span class="req">*</span></label>
+        <input type="number" name="print_qty" min="1" step="1" required placeholder="如 500">
+      </div>
+      <div class="form-row">
+        <label>操作人</label>
+        <input type="text" name="registered_by" placeholder="姓名/工号">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">登记并返回卷号 / 可用张数</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ 包装出货弹窗 ============ -->
+<div id="shipmentModal" class="modal hidden">
+  <div class="modal-box wide">
+    <h3>包装出货确认</h3>
+    <form id="shipmentForm">
+      <div class="form-row">
+        <label>出货批次 <span class="req">*</span></label>
+        <select name="batch_id" id="shipBatch" required></select>
+      </div>
+      <div class="form-row align-top">
+        <label>该批可出货标签卷</label>
+        <div id="shipRollsHint" class="ship-rolls-hint"></div>
+      </div>
+      <div class="form-row align-top">
+        <label>各卷分配张数 <span class="req">*</span></label>
+        <div id="shipAllocations"></div>
+        <small class="hint">只有未停用且绑定有效放行的卷可分配；每卷可分配上限为「已贴用 − 已分配」。</small>
+      </div>
+      <div class="form-row">
+        <label>出货量（张，正整数）<span class="req">*</span></label>
+        <input type="number" name="ship_qty" id="shipQty" min="1" step="1" required placeholder="必须等于各卷分配之和">
+      </div>
+      <div class="form-row">
+        <label>操作人 <span class="req">*</span></label>
+        <input type="text" name="shipped_by" placeholder="姓名/工号" required>
+      </div>
+      <div class="form-row">
+        <label>出货时间</label>
+        <input type="datetime-local" name="shipped_at">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">确认出货（整单校验，失败不占数量）</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ============ 出货质量处置弹窗 ============ -->
+<div id="evaluationModal" class="modal hidden">
+  <div class="modal-box wide">
+    <h3>待评估出货单 · 质量处置（整单）</h3>
+    <div id="evalContent"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

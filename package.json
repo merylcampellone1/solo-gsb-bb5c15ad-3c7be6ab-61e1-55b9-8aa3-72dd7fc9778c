@@ -1,0 +1,19 @@
+{
+  "name": "allergen-tracker",
+  "version": "1.0.0",
+  "description": "食品加工换线过敏原追踪与批次放行系统（Node.js + SQLite + 浏览器前端）",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "init-db": "node -e \"require('./server/db').initDbFile()\"",
+    "test": "node scripts/test-cycle.js",
+    "test:replan": "node scripts/test-replan.js",
+    "test:labels": "node scripts/test-labels.js",
+    "test:shipments": "node scripts/test-shipments.js",
+    "test:evaluations": "node scripts/test-evaluations.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2"
+  }
+}

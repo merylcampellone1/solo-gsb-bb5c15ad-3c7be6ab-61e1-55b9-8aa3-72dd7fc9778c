@@ -1,0 +1,20 @@
+services:
+  allergen-tracker:
+    build: .
+    image: allergen-tracker:latest
+    container_name: allergen-tracker
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      # 容器内服务端口（如修改，需同时修改左侧映射端口）
+      PORT: 3000
+      # 数据库文件位置（挂载到宿主机，本地持久保存记录）
+      DB_PATH: /app/data/allergen.db
+      # 首次启动是否写入演示数据：true=写入，false=空白库
+      SEED_DEMO: "true"
+    volumes:
+      - allergen-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  allergen-data:
