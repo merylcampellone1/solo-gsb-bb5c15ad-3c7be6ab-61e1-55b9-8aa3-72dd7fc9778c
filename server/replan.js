@@ -112,6 +112,63 @@ function normalizeChanges(rawChanges) {
         norm.batch_code = batch_code;
         norm.material_ids = idList(ch.material_ids);
         norm.ref_batch_ids = idList(ch.ref_batch_ids);
+        // 可选：material_inputs 带批号的全量覆盖输入 {material_id, lot_id?|lot_code?}
+        if (ch.material_inputs !== undefined && ch.material_inputs !== null) {
+          if (!Array.isArray(ch.material_inputs)) {
+            errors.push(`${where}：material_inputs 必须是数组`);
+            return;
+          }
+          const parsed = [];
+          let bad = false;
+          ch.material_inputs.forEach((inp, j) => {
+            if (bad) return;
+            const w = `${where}.material_inputs[${j}]`;
+            if (!inp || typeof inp !== 'object') {
+              errors.push(`${w} 必须是 {material_id, lot_id?|lot_code?} 对象`);
+              bad = true; return;
+            }
+            const mid = parseInt(inp.material_id, 10);
+            if (!Number.isInteger(mid)) {
+              errors.push(`${w} 缺少合法的 material_id`);
+              bad = true; return;
+            }
+            const hasLotId = inp.lot_id !== undefined && inp.lot_id !== null && inp.lot_id !== '';
+            const hasLotCode = inp.lot_code !== undefined && inp.lot_code !== null && inp.lot_code !== '';
+            if (hasLotId && hasLotCode) {
+              errors.push(`${w}：lot_id 与 lot_code 只能提供其一`);
+              bad = true; return;
+            }
+            let lotIdRaw = null;
+            let lotCodeRaw = null;
+            if (hasLotId) {
+              lotIdRaw = parseInt(inp.lot_id, 10);
+              if (!Number.isInteger(lotIdRaw)) {
+                errors.push(`${w}：lot_id 不合法`);
+                bad = true; return;
+              }
+            } else if (hasLotCode) {
+              lotCodeRaw = String(inp.lot_code).trim();
+              if (!lotCodeRaw) {
+                errors.push(`${w}：lot_code 不能为空`);
+                bad = true; return;
+              }
+            }
+            parsed.push({ material_id: mid, lot_id: lotIdRaw, lot_code: lotCodeRaw });
+          });
+          if (bad) return;
+          norm.material_inputs = parsed;
+          // 同时携带 material_ids 时原料集合必须一致
+          if (norm.material_ids.length) {
+            const a = [...new Set(parsed.map((x) => x.material_id))].sort((x, y) => x - y);
+            const b = [...new Set(norm.material_ids)].sort((x, y) => x - y);
+            if (a.length !== b.length || a.some((v, i) => v !== b[i])) {
+              errors.push(`${where}：material_inputs 与 material_ids 涉及的原料集合不一致`);
+              return;
+            }
+          } else {
+            norm.material_ids = [...new Set(parsed.map((x) => x.material_id))];
+          }
+        }
       }
       changes.push(norm);
       return;
@@ -182,6 +239,16 @@ function publicChanges(changes) {
         out.batch_code = c.batch_code;
         out.material_ids = c.material_ids;
         out.ref_batch_ids = c.ref_batch_ids;
+        if (c.material_inputs) {
+          out.material_inputs = c.material_inputs.map((x) => {
+            const o = { material_id: x.material_id };
+            // 规范化阶段为 {lot_id?/lot_code?}，解析引用后统一为 material_lot_id
+            const lid = x.material_lot_id !== undefined ? x.material_lot_id : x.lot_id;
+            if (lid != null) o.lot_id = lid;
+            if (x.lot_code != null) o.lot_code = x.lot_code;
+            return o;
+          });
+        }
       }
       return out;
     }
@@ -253,10 +320,11 @@ function canonicalString(v) {
 // 覆盖所有会影响推导结果或放行差异的正式数据；任何相关正式写入都会使指纹变化。
 const FINGERPRINT_SQL = [
   'SELECT id, code, name, allergens FROM materials ORDER BY id',
+  'SELECT id, material_id, lot_code, supplier, note, status, flagged_reason, created_at FROM material_lots ORDER BY id',
   'SELECT id, code, name FROM equipment ORDER BY id',
   'SELECT id, event_time, type, equipment_id, batch_id, note FROM events ORDER BY id',
   'SELECT id, code FROM batches ORDER BY id',
-  'SELECT id, event_id, material_id, batch_id FROM process_inputs ORDER BY id',
+  'SELECT id, event_id, material_id, batch_id, material_lot_id FROM process_inputs ORDER BY id',
   `SELECT id, batch_id, released_at, released_by, snapshot_allergens, status,
           invalid_reason, created_event_seq FROM releases ORDER BY id`,
   // 出货单/明细不影响推导结果，但会影响“将停用卷/待评估出货单”的预测，故一并纳入指纹：
@@ -439,6 +507,38 @@ function resolveChangeRefs(db, changes) {
       for (const mid of c.material_ids) {
         if (!knownMat.has(mid)) errors.push(`事件 #${c.event_id}：原料 #${mid} 不存在`);
       }
+      // 带批号的原料输入：批号必须存在且属于该原料（lot_code 在解析时补成 lot_id）。
+      if (Array.isArray(c.material_inputs)) {
+        const lotRows = db.prepare('SELECT id, material_id, lot_code FROM material_lots').all();
+        const lotById = new Map(lotRows.map((l) => [l.id, l]));
+        const lotByCode = new Map(lotRows.map((l) => [`${l.material_id}|${l.lot_code}`, l]));
+        c.material_inputs = c.material_inputs.map((inp) => {
+          let lotId = null;
+          if (inp.lot_id != null) {
+            const lot = lotById.get(inp.lot_id);
+            if (!lot) {
+              errors.push(`事件 #${c.event_id}：供应批号 #${inp.lot_id} 不存在`);
+            } else if (lot.material_id !== inp.material_id) {
+              errors.push(
+                `事件 #${c.event_id}：供应批号 ${lot.lot_code}（#${lot.id}）属于原料 #${lot.material_id}，` +
+                `与输入原料 #${inp.material_id} 不匹配`
+              );
+            } else {
+              lotId = lot.id;
+            }
+          } else if (inp.lot_code != null) {
+            const lot = lotByCode.get(`${inp.material_id}|${inp.lot_code}`);
+            if (!lot) {
+              errors.push(
+                `事件 #${c.event_id}：原料 #${inp.material_id} 下不存在供应批号 "${inp.lot_code}"`
+              );
+            } else {
+              lotId = lot.id;
+            }
+          }
+          return { material_id: inp.material_id, material_lot_id: lotId };
+        });
+      }
       for (const bid of c.ref_batch_ids) {
         if (!knownBatch.has(bid)) {
           errors.push(`事件 #${c.event_id}：引用批次 #${bid} 不存在`);
@@ -467,6 +567,9 @@ function applyChangesTo(db, resolved) {
   const updBatchCode = db.prepare('UPDATE batches SET code=? WHERE id=?');
   const delInputs = db.prepare('DELETE FROM process_inputs WHERE event_id=?');
   const insMatInput = db.prepare('INSERT INTO process_inputs (event_id, material_id) VALUES (?,?)');
+  const insMatLotInput = db.prepare(
+    'INSERT INTO process_inputs (event_id, material_id, material_lot_id) VALUES (?,?,?)'
+  );
   const insBatchInput = db.prepare('INSERT INTO process_inputs (event_id, batch_id) VALUES (?,?)');
 
   // 先更正，再插入，保证自增序列与影子库一致。
@@ -475,7 +578,13 @@ function applyChangesTo(db, resolved) {
     if (c.type === 'PROCESS') {
       updBatchCode.run(c.batch_code, c._batch_id);
       delInputs.run(c.event_id);
-      for (const mid of c.material_ids) insMatInput.run(c.event_id, mid);
+      if (Array.isArray(c.material_inputs)) {
+        for (const inp of c.material_inputs) {
+          insMatLotInput.run(c.event_id, inp.material_id, inp.material_lot_id);
+        }
+      } else {
+        for (const mid of c.material_ids) insMatInput.run(c.event_id, mid);
+      }
       for (const bid of c.ref_batch_ids) insBatchInput.run(c.event_id, bid);
     }
     updEvent.run(c.event_time, c.equipment_id, c.note, c.event_id);
@@ -503,10 +612,11 @@ function openShadow(sourceDb) {
     tx(rows);
   };
   copy('materials', 'id,code,name,allergens');
+  copy('material_lots', 'id,material_id,lot_code,supplier,note,status,flagged_reason,created_at');
   copy('equipment', 'id,code,name');
   copy('batches', 'id,code');
   copy('events', 'id,event_time,type,equipment_id,batch_id,note');
-  copy('process_inputs', 'id,event_id,material_id,batch_id');
+  copy('process_inputs', 'id,event_id,material_id,batch_id,material_lot_id');
   copy('batch_outputs', 'batch_id,allergens,paths_json');
   copy('equipment_residue', 'equipment_id,allergens,paths_json,last_cleaned_at');
   copy('releases', 'id,batch_id,released_at,released_by,snapshot_allergens,status,invalid_reason,created_event_seq');

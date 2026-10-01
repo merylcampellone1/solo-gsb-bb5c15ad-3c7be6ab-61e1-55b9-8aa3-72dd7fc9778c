@@ -9,6 +9,8 @@ const replan = require('./replan');
 const labels = require('./labels');
 const shipments = require('./shipments');
 const evaluation = require('./evaluation');
+const lots = require('./lots');
+const { traceMaterial } = require('./trace');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -30,7 +32,17 @@ if (process.env.SEED_DEMO !== 'false') {
 app.get('/api/state', (req, res) => {
   const materials = db.prepare(
     'SELECT id, code, name, allergens FROM materials ORDER BY code'
-  ).all().map((m) => ({ ...m, allergens: JSON.parse(m.allergens) }));
+  ).all().map((m) => ({
+    ...m,
+    allergens: JSON.parse(m.allergens),
+    lots: db.prepare(
+      `SELECT id, lot_code, supplier, note, status, flagged_reason, created_at
+         FROM material_lots WHERE material_id = ? ORDER BY lot_code, id`
+    ).all(m.id).map((l) => ({
+      ...l,
+      flagged: l.status === 'FLAGGED'
+    }))
+  }));
 
   const equipment = db.prepare(
     `SELECT e.id, e.code, e.name,
@@ -67,20 +79,27 @@ app.get('/api/state', (req, res) => {
     out_allergens: ev.out_allergens ? JSON.parse(ev.out_allergens) : [],
     out_paths: ev.out_paths ? JSON.parse(ev.out_paths) : {},
     inputs: db.prepare(
-      `SELECT pi.material_id, pi.batch_id AS ref_batch_id,
+      `SELECT pi.material_id, pi.batch_id AS ref_batch_id, pi.material_lot_id,
               m.name AS material_name, m.code AS material_code,
               m.allergens AS material_allergens,
-              rb.code AS ref_batch_code
+              rb.code AS ref_batch_code,
+              ml.lot_code AS material_lot_code,
+              ml.status AS material_lot_status
          FROM process_inputs pi
          LEFT JOIN materials m ON m.id = pi.material_id
          LEFT JOIN batches rb ON rb.id = pi.batch_id
+         LEFT JOIN material_lots ml ON ml.id = pi.material_lot_id
         WHERE pi.event_id = ?`
     ).all(ev.id).map((r) => ({
       material_id: r.material_id,
       ref_batch_id: r.ref_batch_id,
+      material_lot_id: r.material_lot_id,
+      lot_known: r.material_id != null && r.material_lot_id != null,
       material_code: r.material_code,
       material_name: r.material_name,
       material_allergens: r.material_allergens ? JSON.parse(r.material_allergens) : null,
+      material_lot_code: r.material_lot_code,
+      material_lot_status: r.material_lot_status,
       ref_batch_code: r.ref_batch_code
     }))
   }));
@@ -198,6 +217,12 @@ app.delete('/api/materials/:id', (req, res) => {
       'SELECT COUNT(*) AS c FROM process_inputs WHERE material_id=?'
     ).get(req.params.id).c;
     if (used > 0) return res.status(400).json({ error: '该原料已被加工事件引用，请先更正相关事件' });
+    const lotCount = db.prepare(
+      'SELECT COUNT(*) AS c FROM material_lots WHERE material_id=?'
+    ).get(req.params.id).c;
+    if (lotCount > 0) {
+      return res.status(400).json({ error: `该原料下仍登记有 ${lotCount} 个供应批号，请先删除未被投料引用的批号` });
+    }
     const info = db.prepare('DELETE FROM materials WHERE id=?').run(req.params.id);
     if (!info.changes) return res.status(404).json({ error: '原料不存在' });
     res.json({ ok: true });
@@ -257,11 +282,86 @@ function normalizeEquipment(body) {
   return { code, name };
 }
 
+// ---------- 原料供应批号 ----------
+app.post('/api/material-lots', (req, res) => {
+  try {
+    res.json(lots.createLot(db, req.body || {}));
+  } catch (err) { sendLotError(res, err); }
+});
+
+app.get('/api/material-lots', (req, res) => {
+  let material_id = null;
+  if (req.query.material_id !== undefined) {
+    material_id = parseInt(req.query.material_id, 10);
+    if (!Number.isInteger(material_id)) {
+      return res.status(400).json({ error: 'material_id 不合法', code: 'INVALID_REQUEST' });
+    }
+  }
+  res.json(lots.listLots(db, { material_id }));
+});
+
+// 供应商通报异常：标记批号（仅留痕，不自动改变任何放行/卷/出货/处置结论）
+app.post('/api/material-lots/:id/flag', (req, res) => {
+  try {
+    res.json(lots.flagLot(db, parseInt(req.params.id, 10), req.body || {}));
+  } catch (err) { sendLotError(res, err); }
+});
+
+// 解除异常标记
+app.post('/api/material-lots/:id/unflag', (req, res) => {
+  try {
+    res.json(lots.unflagLot(db, parseInt(req.params.id, 10), req.body || {}));
+  } catch (err) { sendLotError(res, err); }
+});
+
+app.delete('/api/material-lots/:id', (req, res) => {
+  try {
+    res.json(lots.deleteLot(db, parseInt(req.params.id, 10)));
+  } catch (err) { sendLotError(res, err); }
+});
+
+function sendLotError(res, err) {
+  if (err && err.name === 'LotError') {
+    if (err.code === 'LOT_NOT_FOUND' || err.code === 'MATERIAL_NOT_FOUND') {
+      return res.status(404).json({ error: err.message, code: err.code, details: err.details });
+    }
+    return res.status(400).json({ error: err.message, code: err.code, details: err.details });
+  }
+  return badRequest(res, err);
+}
+
+// ---------- 原料供应批号流向追溯（只读） ----------
+// GET /api/trace/material-lot?material_id=&lot_id= 或 &lot_code=
+// 省略批号参数 = 查询“该原料批号未知”而无法排除的流向。
+app.get('/api/trace/material-lot', (req, res) => {
+  try {
+    res.json(traceMaterial(db, {
+      material_id: req.query.material_id,
+      lot_id: req.query.lot_id,
+      lot_code: req.query.lot_code,
+      path_limit: req.query.path_limit
+    }));
+  } catch (err) {
+    if (err && err.name === 'TraceError') {
+      return res.status(err.status).json({
+        error: err.message, code: err.code, details: err.details
+      });
+    }
+    console.error(err);
+    return res.status(500).json({ error: err && err.message ? err.message : '服务器内部错误' });
+  }
+});
+
 // ---------- 事件 ----------
 // body: { event_time, type, equipment_id, batch_code, note, material_ids:[], ref_batch_ids:[] }
 app.post('/api/events', (req, res) => {
+  let materialInputs;
   try {
     const body = normalizeEventBody(req.body);
+    // 带供应批号的原料输入在事务前解析（批号不存在 / 与原料不匹配在此明确拒绝）。
+    materialInputs = body.material_inputs !== undefined
+      ? lots.resolveMaterialInputs(db, body.material_inputs)
+      : body.material_ids.map((material_id) => ({ material_id, material_lot_id: null }));
     const { ret, invalidated, retired_rolls, pending_shipments, stale_dispositions } = mutateEvents((d) => {
       let batchId = null;
       if (body.type === 'PROCESS') {
@@ -272,9 +372,10 @@ app.post('/api/events', (req, res) => {
         'INSERT INTO events (event_time, type, equipment_id, batch_id, note) VALUES (?,?,?,?,?)'
       ).run(body.event_time, body.type, body.equipment_id, batchId, body.note).lastInsertRowid;
       if (body.type === 'PROCESS') {
-        for (const mid of body.material_ids) {
-          d.prepare('INSERT INTO process_inputs (event_id, material_id) VALUES (?,?)')
-            .run(eid, mid);
+        for (const inp of materialInputs) {
+          d.prepare(
+            'INSERT INTO process_inputs (event_id, material_id, material_lot_id) VALUES (?,?,?)'
+          ).run(eid, inp.material_id, inp.material_lot_id);
         }
         for (const bid of body.ref_batch_ids) {
           d.prepare('INSERT INTO process_inputs (event_id, batch_id) VALUES (?,?)')
@@ -284,7 +385,7 @@ app.post('/api/events', (req, res) => {
       return eid;
     });
     res.json({ id: ret, invalidated, retired_rolls, pending_shipments, stale_dispositions });
-  } catch (err) { badRequest(res, err); }
+  } catch (err) { sendEventError(res, err); }
 });
 
 app.put('/api/events/:id', (req, res) => {
@@ -296,14 +397,21 @@ app.put('/api/events/:id', (req, res) => {
     if (body.type !== existing.type) {
       return res.status(400).json({ error: '事件类型（加工/清洗）不可变更，请删除后新建' });
     }
+    // 加工事件全量覆盖原料输入（含批号）：批号合法性在事务前解析，非法即拒绝。
+    const materialInputs = body.type === 'PROCESS'
+      ? (body.material_inputs !== undefined
+        ? lots.resolveMaterialInputs(db, body.material_inputs)
+        : body.material_ids.map((material_id) => ({ material_id, material_lot_id: null })))
+      : [];
     const { invalidated, retired_rolls, pending_shipments, stale_dispositions } = mutateEvents((d) => {
       if (body.type === 'PROCESS') {
         d.prepare('UPDATE batches SET code=? WHERE id=?')
           .run(body.batch_code, existing.batch_id);
         d.prepare('DELETE FROM process_inputs WHERE event_id=?').run(existing.id);
-        for (const mid of body.material_ids) {
-          d.prepare('INSERT INTO process_inputs (event_id, material_id) VALUES (?,?)')
-            .run(existing.id, mid);
+        for (const inp of materialInputs) {
+          d.prepare(
+            'INSERT INTO process_inputs (event_id, material_id, material_lot_id) VALUES (?,?,?)'
+          ).run(existing.id, inp.material_id, inp.material_lot_id);
         }
         for (const bid of body.ref_batch_ids) {
           d.prepare('INSERT INTO process_inputs (event_id, batch_id) VALUES (?,?)')
@@ -315,8 +423,16 @@ app.put('/api/events/:id', (req, res) => {
       ).run(body.event_time, body.equipment_id, body.note, existing.id);
     });
     res.json({ ok: true, invalidated, retired_rolls, pending_shipments, stale_dispositions });
-  } catch (err) { badRequest(res, err); }
+  } catch (err) { sendEventError(res, err); }
 });
+
+// 事件写入错误：批号档案类错误带明确 code；其余沿用原 400 形状。
+function sendEventError(res, err) {
+  if (err && err.name === 'LotError') {
+    return res.status(400).json({ error: err.message, code: err.code, details: err.details });
+  }
+  return badRequest(res, err);
+}
 
 app.delete('/api/events/:id', (req, res) => {
   try {
@@ -382,13 +498,51 @@ function normalizeEventBody(body, isUpdate = false) {
   if (!Number.isInteger(equipment_id)) throw new Error('请选择设备');
   const note = String(body.note || '').trim();
 
-  const out = { type, event_time, equipment_id, note, material_ids: [], ref_batch_ids: [] };
+  const out = { type, event_time, equipment_id, note,
+    material_ids: [], material_inputs: undefined, ref_batch_ids: [] };
   if (type === 'PROCESS') {
     const batch_code = String(body.batch_code || '').trim();
     if (!batch_code) throw new Error('产出批次编码不能为空');
     out.batch_code = batch_code;
     out.material_ids = idList(body.material_ids);
     out.ref_batch_ids = idList(body.ref_batch_ids);
+    // 新形态：material_inputs: [{ material_id, lot_id?|lot_code? }]，
+    // 同一原料可出现多次（一次加工使用多个批号）；省略批号的条目记为“批号未知”。
+    if (body.material_inputs !== undefined) {
+      if (!Array.isArray(body.material_inputs)) {
+        throw new Error('material_inputs 必须是数组，每项为 {material_id, lot_id?|lot_code?}');
+      }
+      // 仅做形状与原料 id 提取；批号存在性/归属由 lots.resolveMaterialInputs 做权威校验。
+      out.material_inputs = body.material_inputs.map((inp, idx) => {
+        if (!inp || typeof inp !== 'object') {
+          throw new Error(`material_inputs[${idx}] 必须是对象`);
+        }
+        const mid = parseInt(inp.material_id, 10);
+        if (!Number.isInteger(mid)) {
+          throw new Error(`material_inputs[${idx}] 缺少合法的 material_id`);
+        }
+        return {
+          material_id: mid,
+          lot_id: inp.lot_id !== undefined ? inp.lot_id : undefined,
+          lot_code: inp.lot_code !== undefined ? inp.lot_code : undefined
+        };
+      });
+      // 同时携带旧式 material_ids 时，二者原料集合必须一致（防止调用方误以为旧字段仍生效）。
+      if (out.material_ids.length) {
+        const fromInputs = [...new Set(out.material_inputs.map((x) => x.material_id))].sort((a, b) => a - b);
+        const legacy = [...new Set(out.material_ids)].sort((a, b) => a - b);
+        const sameSet = fromInputs.length === legacy.length &&
+          fromInputs.every((v, i) => v === legacy[i]);
+        if (!sameSet) {
+          throw new Error(
+            'material_inputs 与 material_ids 同时提供时，涉及的原料集合必须完全一致；' +
+            '只传 material_ids 时所有输入记为批号未知'
+          );
+        }
+      } else {
+        out.material_ids = [...new Set(out.material_inputs.map((x) => x.material_id))];
+      }
+    }
   }
   return out;
 }

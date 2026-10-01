@@ -16,6 +16,7 @@
   <button class="tab active" data-tab="batches">批次与放行</button>
   <button class="tab" data-tab="labels">过敏原标签卷</button>
   <button class="tab" data-tab="shipments">包装出货</button>
+  <button class="tab" data-tab="trace">原料批号追溯</button>
   <button class="tab" data-tab="events">事件时间线（加工 / 清洗）</button>
   <button class="tab" data-tab="base">原料与设备</button>
 </nav>
@@ -78,6 +79,39 @@
     <div id="shipmentList" class="shipment-list"></div>
   </section>
 
+  <!-- ============ 原料批号追溯视图 ============ -->
+  <section id="tab-trace" class="tab-panel">
+    <div class="panel-head">
+      <h2>原料供应批号流向追溯（只读查询）</h2>
+    </div>
+    <p class="section-hint">
+      供应商通报某原料供应批号异常时，选择<b>原料与供应批号</b>查询可能流向：系统沿
+      <b>直接投料 → 前序批次引用 → 同设备未清洗残留</b>逐时传播，<b>已核实清洗</b>截断设备残留。
+      结果分为<b>确定命中</b>与<b>因批号未知而无法排除</b>两类（无法排除≠安全，不会误列为安全），
+      并给出每条传播依据与关联出货单。选择“批号未知（无法排除）”可只查该原料批号未知的投料流向。
+      追溯<b>不自动改变</b>放行、标签卷、出货与处置结论；事件更正/删除后按最新合法时间线重新计算。
+    </p>
+    <form id="traceForm" class="trace-form">
+      <div class="form-row">
+        <label>原料 <span class="req">*</span></label>
+        <select name="material_id" id="traceMaterial" required></select>
+      </div>
+      <div class="form-row">
+        <label>供应批号</label>
+        <select name="lot_mode" id="traceLotMode"></select>
+      </div>
+      <div class="form-row">
+        <label>每类依据路径上限</label>
+        <input type="number" name="path_limit" id="tracePathLimit" min="1" max="200" step="1" value="30" style="max-width:120px">
+        <small class="hint">仅限制展示路径数量，受影响批次/出货单不受上限影响、不会漏报。</small>
+      </div>
+      <div class="modal-actions">
+        <button type="submit" class="btn primary">查询流向</button>
+      </div>
+    </form>
+    <div id="traceResult" class="trace-result"></div>
+  </section>
+
   <!-- ============ 事件视图 ============ -->
   <section id="tab-events" class="tab-panel">
     <div class="panel-head">
@@ -111,6 +145,19 @@
         </table>
       </div>
     </div>
+    <div class="panel-head" style="margin-top:24px">
+      <h2>原料供应批号</h2>
+      <button class="btn primary" id="btnNewLot">＋ 登记供应批号</button>
+    </div>
+    <p class="section-hint">
+      供应批号在所属原料下唯一；一次加工可对同种原料登记多个批号。
+      供应商通报异常时可把批号标记为 <b>FLAGGED</b>（仅留痕并提示，不自动改变放行/标签卷/出货/处置结论），
+      然后到“原料批号追溯”页查询流向。已被投料引用的批号不可删除。
+    </p>
+    <table class="grid">
+      <thead><tr><th>原料</th><th>供应批号</th><th>供应商</th><th>状态</th><th>备注 / 通报原因</th><th></th></tr></thead>
+      <tbody id="lotRows"></tbody>
+    </table>
   </section>
 </main>
 
@@ -298,6 +345,29 @@
   <div class="modal-box wide">
     <h3>待评估出货单 · 质量处置（整单）</h3>
     <div id="evalContent"></div>
+  </div>
+</div>
+
+<!-- ============ 供应批号弹窗 ============ -->
+<div id="lotModal" class="modal hidden">
+  <div class="modal-box">
+    <h3>登记原料供应批号</h3>
+    <form id="lotForm">
+      <div class="form-row">
+        <label>原料 <span class="req">*</span></label>
+        <select name="material_id" id="lotMaterial" required></select>
+      </div>
+      <div class="form-row"><label>供应批号 <span class="req">*</span></label>
+        <input type="text" name="lot_code" required placeholder="如 SUP-MILK-20260926-B"></div>
+      <div class="form-row"><label>供应商</label>
+        <input type="text" name="supplier" placeholder="供应商名称（可选）"></div>
+      <div class="form-row align-top"><label>备注</label>
+        <input type="text" name="note" placeholder="如：9/26 到货批"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">登记批号</button>
+      </div>
+    </form>
   </div>
 </div>
 

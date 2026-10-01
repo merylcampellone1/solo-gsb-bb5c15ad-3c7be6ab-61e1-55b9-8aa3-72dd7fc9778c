@@ -6,6 +6,11 @@
 **包装出货时按批次把已贴用标签卷分配给出货单**（整单事务校验，卷停用时相关已出货单转待评估、不自动恢复），
 **待评估出货单由质检按整单登记“准予继续流转/召回”处置**（凭查询状态版本事务核对，记录只增不改；
 此后过敏原/有效放行/停卷信息变化时旧结论保留并标需重新评估、不自动生效）。
+供应商通报某**原料供应批号**异常时，质检可按“原料 + 供应批号”做**流向追溯**：
+每次加工的原料输入可登记所属批号（同原料一次加工可用多个批号；旧事件与只传 `material_ids`
+的写入仍完全可用，其输入记为**批号未知**）；追溯沿直接投料、前序批次引用、同设备未清洗残留
+逐时传播，已核实清洗截断设备残留；结果分**确定命中**与**因批号未知无法排除**两类并给出传播依据与
+关联出货单，事件更正/删除后按最新合法时间线更新。**追溯仅供查询，不自动改变放行、卷、出货与处置结论。**
 
 - 后端：Node.js + Express
 - 数据库：SQLite（[better-sqlite3](https://github.com/WiseLibs/better-sqlite3)，数据文件本地保存）
@@ -463,6 +468,157 @@ curl -s http://localhost:3000/api/shipments/SHIP-0001/evaluation
 | 版本过期（TTL/状态版本已前进/查询后上下文变化），**不产生记录** | 409 | `VERSION_EXPIRED` |
 | 已有有效结论，重复提交（含旧版本）不得覆盖 | 409 | `DISPOSITION_EXISTS` |
 
+## 原料供应批号与流向追溯（本轮新增）
+
+供应商通报某原料的某个**供应批号**异常时，质检需要查清该批号“可能流向了哪些产出批次与出货单”。
+
+### 批号登记与投料归属
+
+- **供应批号档案**（`material_lots`）：批号挂在所属原料下，**同一原料下批号唯一**；
+  可记录供应商与备注。供应商通报异常时可把批号标记为 `FLAGGED`
+  （**仅留痕/提示，不自动改变任何放行、标签卷、出货与处置结论**），事后可解除；
+  已被投料记录引用的批号不可删除（保证追溯证据完整）。
+- **每次加工的原料输入可记录所属供应批号**：加工事件新增请求字段 `material_inputs`，
+  每项 `{ "material_id", "lot_id" }`（或用 `lot_code` 按批号号传入）；
+  **同一种原料允许在一次加工中使用多个批号**（同原料多条投料行）。
+- 条目**省略批号（或给 null）= 批号未知**。
+- **旧写入完全兼容、旧记录不丢失**：只传 `material_ids: [1,2]` 的事件写入（`POST/PUT /api/events`）
+  与整组换线更正仍可用，其全部原料输入记为**批号未知**；旧库启动时自动补列，
+  历史投料一律为批号未知。
+- 投料时**批号不存在、或批号与原料不匹配一律明确拒绝**（`400`，`LOT_NOT_FOUND` /
+  `LOT_MATERIAL_MISMATCH`），不会把批号静默记错到别的原料上。
+- 整组换线预演/确认应用（`/api/replan/preview|apply`）的 `update` 变更同样支持 `material_inputs`
+  全量覆盖输入；批号在影子库校验阶段即核对，非法批号预演即拒绝。
+
+### 追溯规则（只读，按最新合法时间线逐时回放）
+
+`GET /api/trace/material-lot?material_id=&lot_id=`（或 `&lot_code=`）沿当前最新时间线传播：
+
+1. **直接投料**：加工事件直接使用了该批号原料；
+2. **前序批次引用**：后续加工引用了已命中批次，按引用链逐跳传播（可跨设备）；
+3. **同设备未清洗残留**：批号随加工留在设备残留中，被该设备**之后、下一次已核实清洗之前**
+   的每次加工并入；**已核实清洗（CLEAN）截断设备残留**。
+
+结果分两类（互不重叠；受影响对象**不漏报，也不把无法排除的对象误列为安全**）：
+
+- `confirmed_batches`（**确定命中**）：存在可核实传播链，起点是“该原料 + 该批号”的直接投料；
+- `unresolved_batches`（**因该原料批号未知而无法排除**）：传播链起点是“该原料批号未知”的投料，
+  未知证据同样沿前序引用与设备残留继续传播。一个批次没有确定证据、但存在未知证据时必须列入此类；
+  批号未知**不等同于安全**。
+- 省略批号参数（只给 `material_id`）= 查询“**该原料批号未知**”而无法排除的全部流向。
+- 每个批次给出 `evidence.confirmed` / `evidence.unresolved` 的**传播依据链**，并按进入该批次的
+  **最后一跳**标注 `routes: { direct, batch_reference, equipment_residue }`；
+  同时返回 `equipment_residue`（最后一次已核实清洗后批号仍可能滞留的设备）。
+- 每个批次附**关联出货单** `shipments`（单号、状态、数量、待评估原因、当前质量处置摘要），
+  顶层 `shipments.confirmed/unresolved` 为按类别汇总的出货单。
+- **路径展示可限量**：`path_limit`（默认 30，1~200）只限制每类依据展示的链条数，超出给截断标记；
+  **受影响批次/出货单的判定与数量不受限制，不会漏报**。
+- 事件**更正或删除**后，既有“校验 + 全量重算”保证时间线合法，追溯始终按**最新合法时间线**重新计算
+  （追溯结果不持久化）。
+- **追溯只供查询**：不自动改变放行、标签卷、出货单与处置结论；需要处置时仍走既有
+  放行登记/删除、出货质量评估等流程并留痕。
+
+### HTTP API
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `POST /api/material-lots` | 登记供应批号（`material_id`、`lot_code`、`supplier?`、`note?`），返回批号对象 |
+| `GET /api/material-lots` | 批号列表，可 `?material_id=` 过滤 |
+| `POST /api/material-lots/:id/flag` | 供应商通报异常：标记 `FLAGGED`（body 可带 `flagged_reason`，仅留痕） |
+| `POST /api/material-lots/:id/unflag` | 解除异常标记，恢复 `ACTIVE` |
+| `DELETE /api/material-lots/:id` | 删除批号（已被投料引用 → `400 LOT_IN_USE`） |
+| `GET /api/trace/material-lot` | 流向追溯：`?material_id=&lot_id=` 或 `&lot_code=`；省略批号 = 查“批号未知”；可加 `&path_limit=` |
+| `POST /api/events`、`PUT /api/events/:id` | 加工事件新增/全量更正，新增可选 `material_inputs:[{material_id, lot_id?\|lot_code?}]`；旧 `material_ids` 语义不变（记批号未知） |
+| `POST /api/replan/preview`、`POST /api/replan/apply` | `update` 变更支持同一 `material_inputs` 形态 |
+| `GET /api/state` | `materials[].lots` 含各原料批号；事件 `inputs[]` 每项另含 `material_lot_id`/`lot_known`/`material_lot_code`/`material_lot_status` |
+
+批号对象字段：`id`、`material_id`、`material_code`、`material_name`、`lot_code`、`supplier`、
+`note`、`status`（`ACTIVE`/`FLAGGED`）、`flagged`、`flagged_reason`。
+
+### 调用示例（curl，基于演示数据）
+
+演示库已登记：全脂奶粉 `SUP-MILK-20260925-A`（正常）与 `SUP-MILK-20260926-B`（**已通报 FLAGGED**），
+`BATCH-002`(10:00, LINE-A) 同时投入这两个牛奶批号，`BATCH-003`(11:00) 引用 `BATCH-002`；
+`LABEL-0001`/`SHIP-0001` 属于 `BATCH-003`。另在 FRYER-B 上 `BATCH-004`(12:00) 投花生批号
+`SUP-PNT-20260928-3`，13:00 已核实清洗后 `BATCH-005` 为空白验证批。
+
+```bash
+# 1) 登记一个新供应批号（也可标记供应商/备注）
+curl -s -X POST http://localhost:3000/api/material-lots \
+  -H 'Content-Type: application/json' -d '{
+    "material_id": 3, "lot_code": "SUP-MILK-20260927-C",
+    "supplier": "诚信乳业", "note": "9/27 到货批"
+  }'
+# -> { id:5, material_code:"MILK-01", lot_code:"SUP-MILK-20260927-C",
+#      status:"ACTIVE", flagged:false, ... }
+
+# 2) 供应商通报异常：标记批号（仅留痕，不改变任何放行/卷/出货/处置结论）
+curl -s -X POST http://localhost:3000/api/material-lots/2/flag \
+  -H 'Content-Type: application/json' -d '{"flagged_reason":"供应商通报该批可能混入异常原料"}'
+
+# 3) 加工录入：同一次加工中同种原料使用多个批号 + 一个批号未知
+#    （省略 lot_id/lot_code 即批号未知；旧 material_ids 写法仍可用）
+curl -s -X POST http://localhost:3000/api/events \
+  -H 'Content-Type: application/json' -d '{
+    "type":"PROCESS","event_time":"2026-10-01T08:00","equipment_id":1,
+    "batch_code":"BATCH-006","note":"早班蛋糕糊",
+    "material_inputs":[
+      {"material_id":3,"lot_id":1},
+      {"material_id":3,"lot_id":2},
+      {"material_id":3}
+    ],
+    "ref_batch_ids":[]
+  }'
+# -> { id:..., invalidated:[], retired_rolls:[], pending_shipments:[], stale_dispositions:[] }
+
+# 4) 追溯被通报的牛奶批号 B：直接投料 BATCH-002 →（前序引用 + 同设备残留）BATCH-003 → 出货单
+curl -s 'http://localhost:3000/api/trace/material-lot?material_id=3&lot_id=2'
+# -> { query:{ mode:"LOT", material:{code:"MILK-01",...},
+#             lot:{lot_code:"SUP-MILK-20260926-B", status:"FLAGGED", flagged:true} },
+#      summary:{ confirmed_batch_count:2, unresolved_batch_count:0,
+#                confirmed_shipment_count:1, unresolved_shipment_count:0 },
+#      confirmed_batches:[
+#        { batch_code:"BATCH-002", classification:"CONFIRMED",
+#          evidence:{ confirmed:{ routes:{direct:true,batch_reference:false,equipment_residue:false},
+#            chains:["原料:全脂奶粉(MILK-01)[批号:SUP-MILK-20260926-B]"] }, unresolved:{...空} },
+#          shipments:[] },
+#        { batch_code:"BATCH-003", classification:"CONFIRMED",
+#          evidence:{ confirmed:{ routes:{direct:false,batch_reference:true,equipment_residue:true},
+#            chains:[
+#              "原料:全脂奶粉(MILK-01)[批号:SUP-MILK-20260926-B] → 批次引用:BATCH-002",
+#              "原料:全脂奶粉(MILK-01)[批号:SUP-MILK-20260926-B] → 设备残留:LINE-A" ] } },
+#          shipments:[{ shipment_code:"SHIP-0001", status:"SHIPPED", ship_qty:100,
+#                       current_disposition:null, ... }] } ],
+#      unresolved_batches:[], equipment_residue:[],   # 15:00 班后清洗已截断 LINE-A 残留
+#      notice:"本追溯结果仅供质检查询：不会自动改变批次放行、标签卷、出货单与质量处置结论；…" }
+
+# 5) 只查该原料“批号未知”的无法排除流向（演示中全蛋液批号未知：BATCH-002 → BATCH-003）
+curl -s 'http://localhost:3000/api/trace/material-lot?material_id=4'
+# -> { query:{ mode:"UNKNOWN_LOT", ... },
+#      unresolved_batches:[
+#        { batch_code:"BATCH-002", classification:"UNRESOLVED",
+#          evidence:{ unresolved:{ chains:["原料:全蛋液(EGG-01)[批号未知]"],
+#                                  routes:{direct:true,...} } } },
+#        { batch_code:"BATCH-003", ..., shipments:[{shipment_code:"SHIP-0001",...}] } ] }
+
+# 6) 已核实清洗截断残留：花生批号只命中清洗前的 BATCH-004，BATCH-005 安全排除（两类列表都不含）
+curl -s 'http://localhost:3000/api/trace/material-lot?material_id=6&lot_code=SUP-PNT-20260928-3'
+# -> confirmed_batches:["BATCH-004"]；BATCH-005 不在 confirmed 也不在 unresolved
+
+# 7) 路径限量（默认 30，最大 200）：只影响展示链数，受影响对象不漏
+curl -s 'http://localhost:3000/api/trace/material-lot?material_id=3&lot_id=2&path_limit=1'
+```
+
+| 场景 | HTTP | `code` |
+| --- | --- | --- |
+| 批号不存在、原料不存在 | 404 | `LOT_NOT_FOUND` / `MATERIAL_NOT_FOUND` |
+| 批号与指定原料不匹配（查询或投料/换线） | 400 | `LOT_MATERIAL_MISMATCH` |
+| 同原料下批号重复 | 400 | `LOT_CODE_CONFLICT` |
+| 批号已被投料引用仍删除 | 400 | `LOT_IN_USE` |
+| 缺 `material_id`、`path_limit` 越界、`lot_id`/`lot_code` 同传、请求体形状错 | 400 | `INVALID_REQUEST` |
+
+> 追溯是**只读**查询：重复调用不会停用标签卷、不会把出货单转待评估、不会失效放行或改动处置结论。
+
 ## 一键启动（Docker，从空环境开始）
 
 要求安装 Docker 与 Docker Compose（v2）。在项目目录执行：
@@ -501,6 +657,7 @@ npm run test:replan  # 启动临时端口的真实服务，端到端验证整组
 npm run test:labels  # 启动临时端口的真实服务，端到端验证标签卷登记/核销/永久停用全部语义
 npm run test:shipments # 端到端验证包装出货：余额、整单事务拒绝、快照、待评估联动与换线预测
 npm run test:evaluations # 端到端验证待评估单质量处置：评估视图/版本并发/CONTINUE 条件/只增不改/需重新评估
+npm run test:trace       # 端到端验证供应批号登记/投料批号/追溯传播（直接/引用/残留/清洗截断/未知无法排除）/更正删除更新/换线带批号/只读不改动
 ```
 
 ## 访问地址与端口
@@ -540,9 +697,12 @@ npm run test:evaluations # 端到端验证待评估单质量处置：评估视�
   点击「质量评估处置」可查看**出货快照与当前状态对比、准予条件判定**，
   按整单提交**准予继续流转/召回**（操作人、依据、查询状态版本；过期拒绝、记录只增不改），
   页面可查**当前结论（含“需重新评估”标记）与全部历史**。
-- **事件时间线**：按时间排列全部加工/清洗事件，展示输入、引用批次与推导结果；
-  “更正”可修改早期事件，保存时整单校验并触发重算。
-- **原料与设备**：维护原料档案（编码、名称、过敏原标签）与设备档案。
+- **事件时间线**：按时间排列全部加工/清洗事件，展示输入（含每个原料输入的供应批号，未知批号明确标注）、引用批次与推导结果；
+  “更正”可修改早期事件（原料可逐行选择批号，同原料可“＋ 同原料再加批号”录入多个批号），保存时整单校验并触发重算。
+- **原料批号追溯**：选择原料与供应批号（或“批号未知”）查询流向，分区展示**确定命中**与**因批号未知无法排除**
+  的批次（各自传播依据链、传播方式与关联出货单）以及最后清洗后仍可能滞留批号的设备残留；可从“原料与设备”
+  页的批号行一键“追溯流向”。追溯只读，不改动任何业务结论。
+- **原料与设备**：维护原料档案（编码、名称、过敏原标签）、设备档案与**原料供应批号**（登记/通报异常 FLAGGED/解除/删除）。
 
 ## 快速体验失效场景
 
@@ -565,9 +725,11 @@ server/
   labels.js      # 过敏原标签卷：三方一致登记、按修订号核销、永久停用
   shipments.js   # 包装出货：整单事务分配、快照保存、可出货余额、待评估联动（不自动恢复）
   evaluation.js  # 待评估单质量处置：评估视图、签名状态版本、整单结论事务提交、旧结论需重评核对
-  replan.js      # 整组换线：影子库预演、业务版本签名令牌、事务确认应用
-  seed.js        # 首次启动演示数据（含一卷演示标签卷与一张演示出货单）
-  server.js      # Express API 与静态页面（含 /api/label-rolls、/api/shipments、/api/replan/preview|apply、/api/shipments/:id/evaluation|dispositions）
+  lots.js        # 原料供应批号：档案登记/标记/删除、投料批号解析（不存在/不匹配明确拒绝）
+  trace.js       # 批号流向追溯：逐时回放（直接投料/前序引用/设备残留/清洗截断）、确定命中与批号未知无法排除、关联出货单
+  replan.js      # 整组换线：影子库预演、业务版本签名令牌、事务确认应用（update 支持 material_inputs 带批号）
+  seed.js        # 首次启动演示数据（含供应批号、同原料多批号投料、一卷演示标签卷与一张演示出货单）
+  server.js      # Express API 与静态页面（含 /api/material-lots、/api/trace/material-lot、/api/label-rolls、/api/shipments、/api/replan/preview|apply、/api/shipments/:id/evaluation|dispositions）
 public/
   index.html  styles.css  app.js
 scripts/
@@ -576,5 +738,6 @@ scripts/
   test-labels.js     # 标签卷登记/核销/停用端到端测试
   test-shipments.js  # 包装出货：余额/整单事务/快照/待评估联动端到端测试
   test-evaluations.js # 出货质量处置：评估视图/版本并发/CONTINUE 条件/只增不改/需重新评估端到端测试
+  test-trace.js       # 供应批号与流向追溯：档案/投料批号/三路径传播/清洗截断/未知无法排除/更正删除/换线带批号/只读 端到端测试
 Dockerfile  docker-compose.yml
 ```

@@ -33,6 +33,20 @@ function initSchema(d) {
     allergens TEXT NOT NULL DEFAULT '[]'  -- JSON 字符串数组
   );
 
+  -- 原料供应批号（批号档案）：同一供应批号号只在一种原料下唯一；供应商通报异常时
+  -- 可置 status='FLAGGED'（仅标记，供追溯查询参考，不自动改变任何放行/出货结论）。
+  CREATE TABLE IF NOT EXISTS material_lots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    material_id INTEGER NOT NULL REFERENCES materials(id),
+    lot_code TEXT NOT NULL,             -- 供应批号（供应商批号），同一原料下唯一
+    supplier TEXT NOT NULL DEFAULT '',  -- 供应商（可选）
+    note TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','FLAGGED')),
+    flagged_reason TEXT NOT NULL DEFAULT '', -- 供应商通报异常说明（仅留痕/提示）
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (material_id, lot_code)
+  );
+
   CREATE TABLE IF NOT EXISTS equipment (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL UNIQUE,
@@ -59,6 +73,9 @@ function initSchema(d) {
     event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
     material_id INTEGER REFERENCES materials(id),
     batch_id INTEGER REFERENCES batches(id),
+    -- 本次原料输入所属供应批号：可空 = 批号未知（旧事件只传 material_ids 的输入均记为未知）。
+    -- 只对原料输入有意义；引用批次输入恒为 NULL。
+    material_lot_id INTEGER REFERENCES material_lots(id),
     CHECK ((material_id IS NOT NULL AND batch_id IS NULL)
         OR (material_id IS NULL AND batch_id IS NOT NULL))
   );
@@ -186,6 +203,7 @@ function initSchema(d) {
 
   CREATE INDEX IF NOT EXISTS idx_events_time ON events(event_time, id);
   CREATE INDEX IF NOT EXISTS idx_process_inputs_event ON process_inputs(event_id);
+  CREATE INDEX IF NOT EXISTS idx_material_lots_material ON material_lots(material_id);
   CREATE INDEX IF NOT EXISTS idx_releases_batch ON releases(batch_id);
   CREATE INDEX IF NOT EXISTS idx_label_rolls_batch ON label_rolls(batch_id);
   CREATE INDEX IF NOT EXISTS idx_label_usages_roll ON label_roll_usages(roll_id);
@@ -195,6 +213,17 @@ function initSchema(d) {
   CREATE INDEX IF NOT EXISTS idx_shipment_items_roll ON shipment_items(roll_id);
   CREATE INDEX IF NOT EXISTS idx_ship_disp_shipment ON shipment_dispositions(shipment_id);
   `);
+
+  // ---- 旧库迁移（CREATE TABLE IF NOT EXISTS 不会为既有表补列）----
+  // process_inputs.material_lot_id：原料供应批号归属；旧记录全部保持 NULL（批号未知），不丢失。
+  // 注意：引用该列的索引必须在补列之后再创建，否则旧库建索引会报“无此列”。
+  const inputCols = d.prepare("PRAGMA table_info(process_inputs)").all().map((c) => c.name);
+  if (!inputCols.includes('material_lot_id')) {
+    d.exec(
+      'ALTER TABLE process_inputs ADD COLUMN material_lot_id INTEGER REFERENCES material_lots(id)'
+    );
+  }
+  d.exec('CREATE INDEX IF NOT EXISTS idx_process_inputs_lot ON process_inputs(material_lot_id)');
 }
 
 module.exports = { getDb, initDbFile, initSchema, DB_PATH };

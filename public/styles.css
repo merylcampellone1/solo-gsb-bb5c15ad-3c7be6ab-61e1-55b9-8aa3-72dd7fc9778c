@@ -272,3 +272,44 @@ tr.hist-stale { background: var(--warn-bg); }
 #evalContent code {
   background: #eef2f5; border-radius: 4px; padding: 0 6px; font-size: 12px;
 }
+
+/* ---------- 原料供应批号 ---------- */
+.lot-badge {
+  display: inline-block; font-size: 11px; border-radius: 10px; padding: 1px 8px;
+  margin-left: 2px; white-space: nowrap;
+}
+.lot-badge.known { background: #e6f1fb; color: #1c5d92; border: 1px solid #b9d8ef; }
+.lot-badge.unknown { background: #f3f3f3; color: #777; border: 1px dashed #bbb; }
+.lot-badge.flagged { background: var(--danger-bg, #fdecea); color: var(--danger, #b3261e); border: 1px solid #e6b3ad; }
+.lot-pick-group { margin: 4px 0; }
+.lot-pick-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; flex-wrap: wrap; }
+.lot-pick-row .lot-mat { display: flex; align-items: center; gap: 4px; min-width: 230px; font-weight: normal; }
+.lot-pick-row .lot-select { min-width: 240px; padding: 3px 6px; }
+
+/* ---------- 批号追溯 ---------- */
+.trace-form {
+  display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap;
+  background: #fbfcfd; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 10px 0 18px;
+}
+.trace-form .form-row { margin: 0; }
+.trace-form select { min-width: 260px; padding: 6px 8px; }
+.trace-result { margin-top: 12px; }
+.trace-summary {
+  border: 1px solid var(--line); border-left: 4px solid #1c5d92; border-radius: 8px;
+  padding: 10px 14px; background: #f6fafd; font-size: 13.5px; margin-bottom: 14px;
+}
+.trace-batch {
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin: 8px 0; background: #fff;
+}
+.trace-batch.is-confirmed { border-left: 4px solid var(--ok, #1d7d46); }
+.trace-batch.is-unresolved { border-left: 4px solid #c8881f; background: #fffdf7; }
+.badge.confirmed { background: var(--ok-bg, #e8f6ee); color: var(--ok, #1d7d46); border: 1px solid #b7dcc5; }
+.badge.unresolved { background: var(--warn-bg, #fdf4e0); color: #8a5a12; border: 1px solid #e8d29a; }
+.unres-text { color: #8a5a12; }
+.trace-evidence { margin: 6px 0; font-size: 12.5px; color: #33455a; }
+.trace-route { font-weight: 600; margin-top: 4px; }
+ul.trace-paths { margin: 4px 0 4px 4px; padding-left: 18px; }
+ul.trace-paths li { margin: 2px 0; font-size: 12px; }
+li.trace-trunc { color: #888; list-style: none; margin-left: -16px; }
+.trace-ships { margin-top: 6px; font-size: 12.5px; }
+.trace-residue { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }

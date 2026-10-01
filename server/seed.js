@@ -22,7 +22,7 @@ function seedIfEmpty() {
        VALUES (?,?,?,?,?)`
     );
     const insInput = db.prepare(
-      'INSERT INTO process_inputs (event_id, material_id, batch_id) VALUES (?,?,?)'
+      'INSERT INTO process_inputs (event_id, material_id, batch_id, material_lot_id) VALUES (?,?,?,?)'
     );
 
     const mats = {};
@@ -37,6 +37,25 @@ function seedIfEmpty() {
     addMat('PEANUT-01', '花生碎', ['花生']);
     addMat('SALT-01', '食用盐', []);
 
+    // ---- 原料供应批号档案（供应商批号）----
+    // 允许同原料多批号；MILK-B 标记 FLAGGED 供追溯演示（仅留痕，不改变任何放行/出货结论）。
+    const insLot = db.prepare(
+      `INSERT INTO material_lots (material_id, lot_code, supplier, note, status, flagged_reason)
+       VALUES (?,?,?,?,?,?)`
+    );
+    const lot = {};
+    const lotId = (key, matCode, lotCode, supplier, note, flagged = false) => {
+      lot[key] = insLot.run(
+        mats[matCode], lotCode, supplier, note,
+        flagged ? 'FLAGGED' : 'ACTIVE',
+        flagged ? '供应商通报该批号可能混入异常原料，请质检追溯流向' : ''
+      ).lastInsertRowid;
+    };
+    lotId('MILK-A', 'MILK-01', 'SUP-MILK-20260925-A', '诚信乳业', '9/25 到货全脂奶粉 A 批');
+    lotId('MILK-B', 'MILK-01', 'SUP-MILK-20260926-B', '诚信乳业', '9/26 到货全脂奶粉 B 批（供应商通报异常）', true);
+    lotId('WHEAT-A', 'WHEAT-01', 'SUP-WHEAT-20260920-7', '北方粮贸', '面粉常规批');
+    lotId('PEANUT-A', 'PEANUT-01', 'SUP-PNT-20260928-3', '鲁东花生', '花生碎批');
+
     const lineA = insEquip.run('LINE-A', '烘焙A线').lastInsertRowid;
     const fryerB = insEquip.run('FRYER-B', '油炸B线').lastInsertRowid;
 
@@ -48,26 +67,29 @@ function seedIfEmpty() {
       insEvent.run(D + time, 'PROCESS', equip, bid, note).lastInsertRowid;
     const clean = (time, equip, note) =>
       insEvent.run(D + time, 'CLEAN', equip, null, note).lastInsertRowid;
-    const matInput = (eid, code) => insInput.run(eid, mats[code], null);
-    const batchInput = (eid, code) => insInput.run(eid, null, batchIds[code]);
+    const matInput = (eid, code, lotKey = null) =>
+      insInput.run(eid, mats[code], null, lotKey ? lot[lotKey] : null);
+    const batchInput = (eid, code) => insInput.run(eid, null, batchIds[code], null);
 
     const e1 = process('08:00', lineA, batchIds['BATCH-001'], '早班面团');
-    matInput(e1, 'WHEAT-01');
-    matInput(e1, 'SALT-01');
+    matInput(e1, 'WHEAT-01', 'WHEAT-A'); // 已知批号
+    matInput(e1, 'SALT-01');             // 食用盐未登记批号（批号未知）
 
     clean('09:00', lineA, '换线前已核实清洗');
 
     const e3 = process('10:00', lineA, batchIds['BATCH-002'], '蛋糕糊');
-    matInput(e3, 'MILK-01');
-    matInput(e3, 'EGG-01');
+    // 同一次加工中同种原料使用两个批号：MILK-A（正常）+ MILK-B（供应商已通报异常）
+    matInput(e3, 'MILK-01', 'MILK-A');
+    matInput(e3, 'MILK-01', 'MILK-B');
+    matInput(e3, 'EGG-01');              // 全蛋液批号未知（无法排除场景）
 
     const e4 = process('11:00', lineA, batchIds['BATCH-003'], '芝麻风味蛋糕糊（引用上一批）');
-    matInput(e4, 'SESAME-01');
+    matInput(e4, 'SESAME-01');           // 芝麻酱批号未知
     batchInput(e4, 'BATCH-002');
 
     const e5 = process('12:00', fryerB, batchIds['BATCH-004'], '裹粉花生');
-    matInput(e5, 'PEANUT-01');
-    matInput(e5, 'SOY-01');
+    matInput(e5, 'PEANUT-01', 'PEANUT-A');
+    matInput(e5, 'SOY-01');              // 酱油批号未知
 
     clean('13:00', fryerB, '已核实清洗（CIP + 目视复核）');
 
